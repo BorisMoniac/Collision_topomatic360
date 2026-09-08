@@ -9,7 +9,6 @@ export interface Snapshot {
   models: { id: string; name: string }[];
 }
 const markerLayer = "nashepo.checks.points";
-const overlayId = "nashepo.checks.highlight";
 function checkpoint(aborted: () => boolean) {
   let tick = performance.now();
   return async () => {
@@ -47,7 +46,6 @@ function flatten(
 export class ModelHost {
   private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
-  private overlay?: { view: CadViewContext; layer: CadViewLayer };
   private pointView?: CadViewContext;
   private scannedApp?: Application;
   private scannedView?: CadViewContext;
@@ -333,11 +331,6 @@ export class ModelHost {
     this.view!.invalidate();
   }
   clear() {
-    if (this.overlay) {
-      this.overlay.view.layer.removeLayer(this.overlay.layer);
-      this.overlay.view.invalidate();
-      this.overlay = undefined;
-    }
     if (this.pointView) {
       const l = this.pointView.annotations.get(markerLayer);
       if (l) this.pointView.annotations.release(l);
@@ -368,90 +361,20 @@ export class ModelHost {
       p,
     );
   }
+  /**
+   * Выделить оба элемента коллизии штатным выделением программы.
+   *
+   * Раньше вместо этого поверх модели рисовалась перекрашенная копия обоих
+   * элементов. При камере с масштабом сдвиг, который убирал мерцание граней,
+   * получался не миллиметровым, а заметным, и красная копия оказывалась в
+   * стороне от самой коллизии. Штатное выделение такой копии не создаёт.
+   */
   private highlight(ids: string[]) {
-    if (this.overlay) {
-      this.overlay.view.layer.removeLayer(this.overlay.layer);
-      this.overlay = undefined;
-    }
-    const view = this.view!,
-      objects = ids.flatMap((id, side) =>
-        (this.refs.get(id) || []).map((obj) => ({ obj, side })),
-      );
-    const surfaces = objects.flatMap(({ obj, side }) =>
-      Object.values(obj.meshes).flatMap((mesh) => {
-        const g = mesh.geometry;
-        if (!g) return [];
-        const color = side === 0 ? 0xff3636ff : 0xffff9d2b;
-        const indices = new Uint32Array(g.indices.length * 2);
-        indices.set(g.indices);
-        for (let i = 0; i < g.indices.length; i += 3) {
-          indices[g.indices.length + i] = g.indices[i];
-          indices[g.indices.length + i + 1] = g.indices[i + 2];
-          indices[g.indices.length + i + 2] = g.indices[i + 1];
-        }
-        const geometry: UuidGeometry3d = {
-          uuid: "nashepo.checks." + side + "." + g.uuid,
-          vertices: g.vertices,
-          normals: g.normals,
-          bounds: g.bounds,
-          indices,
-          colors: new Uint32Array(g.vertices.length / 3).fill(color),
-        };
-        return [{ obj, geometry, color }];
-      }),
-    );
-    const paint = (dc: DeviceContext, camera: Camera) => {
-      const old = dc.color,
-        material = dc.rasterizer.material;
-      dc.rasterizer.material = undefined;
-      const inverse = Math3d.mat4.inverse(Math3d.mat4.alloc(), camera.view);
-      try {
-        for (const { obj, geometry, color } of surfaces) {
-          dc.color = color;
-          dc.pushMatrix();
-          try {
-            const matrix = Math3d.mat4.alloc();
-            for (let i = 0; i < 16; i++) matrix[i] = obj.matrix[i];
-            // A small view-facing offset avoids fighting the original surface's depth.
-            const offset = 0.001;
-            matrix[12] += inverse[8] * offset;
-            matrix[13] += inverse[9] * offset;
-            matrix[14] += inverse[10] * offset;
-            dc.multMatrix(matrix);
-            dc.mesh(geometry);
-          } finally {
-            dc.popMatrix();
-          }
-        }
-      } finally {
-        dc.color = old;
-        dc.rasterizer.material = material;
-      }
-    };
-    const layer: CadViewLayer = {
-      id: overlayId,
-      order: 10000,
-      visible: true,
-      paint: () => {},
-      paint3d: paint,
-      paintObject: () => {},
-      paintSelected: () => {},
-      release: () => {},
-      bounds: () => undefined,
-      *objectsAt() {},
-      *selectableObjects() {},
-      *selectedObjects() {},
-      selectObject: () => {},
-      selectObjects: () => {},
-      isSelectedObject: () => false,
-      clearSelected: () => {},
-      owned: () => false,
-      regenCadView: () => {},
-      hasSelected: () => false,
-      *osnap() {},
-    };
-    view.layer.addLayer(layer);
-    this.overlay = { view, layer };
+    const view = this.view;
+    if (!view) return;
+    const objects = new Set(ids.flatMap((id) => this.refs.get(id) || []));
+    view.layer.clearSelected();
+    view.layer.selectObjects((o) => objects.has(o), true);
     view.invalidate();
   }
   async snapshot(
