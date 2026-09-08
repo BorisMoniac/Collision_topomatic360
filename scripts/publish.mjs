@@ -21,7 +21,9 @@ mkdirSync(out, { recursive: true });
 if (existsSync(resolve(out, "js")))
   for (const f of readdirSync(resolve(out, "js"), { withFileTypes: true }))
     if (f.isFile()) unlinkSync(resolve(out, "js", f.name));
-const manifest = JSON.parse(readFileSync(resolve(root, "dist/package.json"), "utf8"));
+const manifest = JSON.parse(
+  readFileSync(resolve(root, "dist/package.json"), "utf8"),
+);
 for (const file of ["index.html", "package.json", manifest.main]) {
   const target = resolve(out, file);
   mkdirSync(dirname(target), { recursive: true });

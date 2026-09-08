@@ -1,3 +1,4 @@
+import { helpHtml } from "./help";
 import {
   Check,
   Clash,
@@ -39,7 +40,7 @@ export function mountPanel(
   const check = () => saved.checks.find((c) => c.id === current);
   const q = <T extends HTMLElement = HTMLElement>(id: string) =>
     root.querySelector<T>("#" + id)!;
-  root.innerHTML = `<style>${css}</style><main><header><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>0.1.0</small></div><button id="scan">Обновить модели</button><button id="new" class="primary">＋ Проверка</button><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="settings">⚙</button><button id="help">Справка</button><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Обновить модели».</div><div class="workspace"><aside><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><button id="all">Запустить все</button></aside><section class="main"><div class="test-toolbar"><input id="name" aria-label="Имя проверки" placeholder="Имя проверки"><button id="copy">Копировать</button><button id="delete">Удалить</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button></div><div id="tabs" class="tabs">${[
+  root.innerHTML = `<style>${css}</style><main><header><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>0.2.0</small></div><button id="scan">Обновить модели</button><button id="new" class="primary">＋ Проверка</button><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="settings">⚙</button><button id="help">Справка</button><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Обновить модели».</div><div class="workspace"><aside><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><button id="all">Запустить все</button></aside><section class="main"><div class="test-toolbar"><input id="name" aria-label="Имя проверки" placeholder="Имя проверки"><button id="copy">Копировать</button><button id="delete">Удалить</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button></div><div id="tabs" class="tabs">${[
     ["rules", "Правила"],
     ["select", "Выбрать"],
     ["results", "Результаты"],
@@ -48,7 +49,7 @@ export function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog"><h2>Проверки коллизий</h2><p>Загрузите модели штатными средствами Топоматик 360. Обновите список моделей, создайте проверку и задайте выборки А и Б. Пустой список моделей в выборке означает «Все прочитанные модели».</p><p>Условия по свойствам автоматически вычисляются перед каждым запуском. Можно добавить выделенные в сцене элементы и исключить отдельные элементы из выборки.</p><p>Пересечения ищутся по треугольным поверхностям. Вложенность дополнительно проверяется для замкнутых тел. «Учитывать касания» добавляет соприкосновения поверхностей. Точность расчёта задаётся в мм; это числовая погрешность, а не фильтр по глубине проникновения.</p><p>Дубликаты — совпадающие мировые треугольники после округления координат с заданной точностью. Разная триангуляция одной формы пока не распознаётся как дубликат. Для проверки модели самой с собой выберите её и в А, и в Б.</p><p>Повторный запуск сохраняет комментарии и назначения. Исчезнувшие конфликты становятся исправленными только при неизменных условиях и полном составе моделей. После изменения условий начинается новый набор результатов, прежние результаты сохраните в файл перед запуском.</p><p>Сохранить проверки — файл правил и результатов для продолжения работы. Отчёт HTML — документ для передачи. Сессия «Коллизии» открывается в плагине просмотра готовых результатов.</p><p>Знаки отображаются для максимум 3000 текущих результатов. В таблице доступны все найденные конфликты. Подсветка и переход относятся к выбранной паре элементов.</p><button data-close="help-dialog">Закрыть</button></dialog></main>`;
+    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog></main>`;
   const note = (text: string, error = false) => {
     q("notice").textContent = text;
     q("notice").classList.toggle("error", error);
@@ -91,7 +92,10 @@ export function mountPanel(
     return (c?.results || []).filter(
       (r) =>
         (!state || r.state === state) &&
-        (!search || JSON.stringify(r).toLowerCase().includes(search)),
+        (!search ||
+          JSON.stringify({ ...r, image: undefined })
+            .toLowerCase()
+            .includes(search)),
     );
   }
   function renderChecks() {
@@ -109,7 +113,7 @@ export function mountPanel(
       snapshot?.elements.filter(
         (x) => (check()!.includeHidden || !x.hidden) && matches(x, s),
       ).length || 0;
-    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span>${count} элементов</span></h3><label>Модели (без выбора — все)<select multiple size="3" class="models">${(snapshot?.models || []).map((m) => `<option value="${e(m.id)}" ${s.models.includes(m.id) ? "selected" : ""}>${e(m.name)}</option>`).join("")}</select></label><div class="selection-tools"><button data-selection="show">Показать</button><button data-selection="include">＋ Из выделения</button><button data-selection="exclude">− Из выделения</button><button data-selection="reset">Сбросить ручной выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small><label>Условия<select class="mode"><option value="all" ${s.mode === "all" ? "selected" : ""}>Выполнены все (И)</option><option value="any" ${s.mode === "any" ? "selected" : ""}>Выполнено любое (ИЛИ)</option></select></label><div class="conditions">${s.conditions
+    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span>${count} элементов</span></h3><p class="selection-mode">${s.manualOnly ? "Ручная выборка — только указанные элементы" : "Автоматическая выборка — модели и условия"}</p><label>Модели (Ctrl — несколько; без выбора — все)<select multiple size="8" class="models">${(snapshot?.models || []).map((m) => `<option value="${e(m.id)}" ${s.models.includes(m.id) ? "selected" : ""}>${e(m.name)}</option>`).join("")}</select></label><div class="selection-tools"><button data-selection="show">Показать выборку</button><button data-selection="only">Только выделенные</button><button data-selection="include">＋ Добавить выделенные</button><button data-selection="exclude">− Исключить выделенные</button><button data-selection="reset">Вернуть автоматический выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small><label>Условия<select class="mode"><option value="all" ${s.mode === "all" ? "selected" : ""}>Выполнены все (И)</option><option value="any" ${s.mode === "any" ? "selected" : ""}>Выполнено любое (ИЛИ)</option></select></label><div class="conditions">${s.conditions
       .map(
         (c, i) =>
           `<div class="condition" data-condition="${i}"><input class="field" list="property-fields" value="${e(c.field)}" placeholder="Свойство"><select class="op">${[
@@ -147,7 +151,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="parameters"><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая точность; не глубина проникновения">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая точность; не глубина проникновения">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено.</small><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -171,7 +175,7 @@ export function mountPanel(
     }
     if (tab === "report")
       q("content").innerHTML =
-        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><button id="export-html" class="primary">Сформировать HTML-отчёт</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
+        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать HTML-отчёт</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
   function renderTable() {
@@ -191,7 +195,7 @@ export function mountPanel(
   function renderDetail() {
     const r = check()?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Сохранить текущий ракурс</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -221,6 +225,7 @@ export function mountPanel(
     );
   }
   function pick(id: string, focus = false) {
+    if (busy) return;
     selected = id;
     if (tab === "results") {
       for (const row of root.querySelectorAll<HTMLElement>("[data-result]"))
@@ -273,7 +278,13 @@ export function mountPanel(
     try {
       instance = new EngineWorker();
     } catch {
-      return calculate(snapshot!.elements, c, report, () => aborted);
+      return calculate(
+        snapshot!.elements,
+        c,
+        report,
+        () => aborted,
+        (id) => host.geometry(id, () => aborted),
+      );
     }
     worker = instance;
     return new Promise((resolve, reject) => {
@@ -286,7 +297,31 @@ export function mountPanel(
         finish();
         reject(Error("Расчёт отменён. Предыдущие результаты сохранены."));
       };
-      instance.onmessage = (event) => {
+      instance.onmessage = async (event) => {
+        if (event.data.load) {
+          try {
+            const geometry = await host.geometry(
+              event.data.load,
+              () => aborted || worker !== instance,
+            );
+            if (worker !== instance) return;
+            const buffers = [
+              geometry.vertices?.buffer,
+              geometry.indices?.buffer,
+            ].filter(Boolean) as ArrayBuffer[];
+            instance.postMessage(
+              { request: event.data.request, geometry },
+              buffers,
+            );
+          } catch (error) {
+            if (worker === instance)
+              instance.postMessage({
+                request: event.data.request,
+                error: error instanceof Error ? error.message : String(error),
+              });
+          }
+          return;
+        }
         if (event.data.progress) report(event.data.progress);
         else {
           finish();
@@ -304,7 +339,8 @@ export function mountPanel(
       };
       instance.postMessage({
         elements: snapshot!.elements,
-        check: structuredClone(c),
+        streaming: typeof host.geometry === "function",
+        check: structuredClone({ ...c, results: [], warnings: [] }),
       });
     });
   }
@@ -391,6 +427,7 @@ export function mountPanel(
       index =
         target.closest<HTMLElement>("[data-condition]")?.dataset.condition;
     const input = target as HTMLInputElement;
+    if (input.classList.contains("models")) s.manualOnly = false;
     if (input.classList.contains("models"))
       s.models = Array.from((target as HTMLSelectElement).selectedOptions).map(
         (o) => o.value,
@@ -603,7 +640,7 @@ export function mountPanel(
     }
   };
   q("content").onclick = (event) =>
-    action(() => {
+    action(async () => {
       const t = event.target as HTMLElement,
         b = t.closest<HTMLButtonElement>("button"),
         c = check();
@@ -629,6 +666,14 @@ export function mountPanel(
                   .map((x) => x.id),
               );
               return;
+            case "only": {
+              const ids = host.selected();
+              if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
+              s.include = ids;
+              s.exclude = [];
+              s.manualOnly = true;
+              break;
+            }
             case "include": {
               const ids = host.selected();
               if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
@@ -644,6 +689,7 @@ export function mountPanel(
               break;
             }
             case "reset":
+              s.manualOnly = false;
               s.include = [];
               s.exclude = [];
           }
@@ -674,6 +720,44 @@ export function mountPanel(
         renderChecks();
         markers();
       }
+      if (b?.id === "capture-image") {
+        const r = c.results.find((r) => r.id === selected);
+        if (r) {
+          aborted = false;
+          setBusy(true);
+          try {
+            r.image = await host.snapshot(
+              r,
+              Number(q<HTMLInputElement>("distance").value),
+              () => aborted,
+              true,
+            );
+            mark();
+            renderDetail();
+            note("Снимок сохранён в результат.");
+          } finally {
+            setBusy(false);
+          }
+        }
+        return;
+      }
+      if (b?.id === "open-image") {
+        const r = c.results.find((r) => r.id === selected);
+        if (r?.image) {
+          const dialog = document.createElement("dialog");
+          dialog.className = "image-dialog";
+          dialog.innerHTML =
+            '<button>Закрыть</button><img alt="Снимок коллизии">';
+          dialog.querySelector("img")!.src = r.image;
+          dialog.querySelector("button")!.onclick = () => {
+            dialog.close();
+            dialog.remove();
+          };
+          root.append(dialog);
+          dialog.showModal();
+        }
+        return;
+      }
       if (b?.id === "focus") pick(selected, true);
       if (b?.id === "previous" || b?.id === "next") {
         const rows = resultRows(),
@@ -691,9 +775,60 @@ export function mountPanel(
           ? c.results.filter((r) => checked.has(r.id))
           : c.results;
         if (!rows.length) throw Error("Нет результатов для отчёта.");
+        if (q<HTMLInputElement>("report-images").checked) {
+          const view = host.view,
+            previous = view?.storeView();
+          aborted = false;
+          setBusy(true);
+          try {
+            let i = 0;
+            for (const row of rows) {
+              if (aborted)
+                throw Error(
+                  "Подготовка отчёта отменена. Уже полученные снимки сохранены.",
+                );
+              note("Подготовка снимков: " + ++i + " / " + rows.length);
+              if (!row.image) {
+                if (row.state === "resolved" && !host.canLocate(row)) continue;
+                row.image = await host.snapshot(
+                  row,
+                  Number(q<HTMLInputElement>("distance").value),
+                  () => aborted,
+                );
+                mark();
+              }
+            }
+          } finally {
+            if (view && host.isCurrent()) {
+              const r = c.results.find((r) => r.id === selected);
+              if (r)
+                try {
+                  host.focus(
+                    r,
+                    Number(q<HTMLInputElement>("distance").value),
+                    false,
+                  );
+                } catch {}
+              if (previous) view.restoreView(previous);
+            }
+            setBusy(false);
+          }
+        }
+        const exportRows = q<HTMLInputElement>("report-images").checked
+          ? rows
+          : rows.map((r) => ({ ...r, image: undefined }));
         download(
           c.name + (b.id === "export-html" ? ".html" : ".collision360.json"),
-          b.id === "export-html" ? reportHtml(c, rows) : viewerSession(c, rows),
+          b.id === "export-html"
+            ? reportHtml(c, exportRows)
+            : viewerSession(c, exportRows),
+        );
+        note(
+          "Отчёт подготовлен. Результатов: " +
+            rows.length +
+            "; со снимками: " +
+            exportRows.filter((r) => r.image).length +
+            ".",
         );
       }
       const row = t.closest<HTMLElement>("[data-result]");

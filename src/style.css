@@ -483,3 +483,111 @@ dialog a {
 label {
   font-size: 13px;
 }
+.choose-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.choose-layout .parameters {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 15px;
+  border-right: 1px solid #354459;
+  justify-content: flex-start;
+}
+.choose-layout .parameters input {
+  width: 100%;
+}
+.choose-layout .parameters input[type="checkbox"] {
+  width: 16px;
+}
+.choose-layout .selection-grid {
+  padding: 10px 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  min-width: 0;
+}
+.selection select[multiple] {
+  height: 180px;
+  resize: vertical;
+}
+.selection-mode {
+  font-size: 12px;
+  color: #b6c4d5;
+}
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-family: inherit !important;
+}
+.part-a {
+  color: #ff6161;
+}
+.part-b {
+  color: #65baff;
+}
+.preview {
+  display: block;
+  width: 100%;
+  padding: 5px;
+  margin: 8px 0;
+}
+.preview img {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+}
+.image-dialog {
+  width: 94vw;
+  max-width: 1500px;
+}
+.image-dialog img {
+  display: block;
+  max-width: 100%;
+  max-height: 75vh;
+  margin: 10px auto;
+}
+#help-dialog {
+  width: min(1000px, 94vw);
+  line-height: 1.6;
+}
+#help-dialog details {
+  padding: 12px 0;
+  border-bottom: 1px solid #425165;
+}
+#help-dialog summary {
+  font-size: 16px;
+  font-weight: 600;
+  color: #f0d27a;
+}
+#help-dialog li {
+  margin: 8px 0;
+}
+@container (max-width:1100px) {
+  .choose-layout {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+  .choose-layout .selection-grid {
+    grid-template-columns: 1fr;
+  }
+  .condition {
+    grid-template-columns: minmax(60px, 1fr) 100px minmax(60px, 1fr) 29px;
+  }
+}
+@container (max-width:700px) {
+  .choose-layout {
+    display: block;
+  }
+  .choose-layout .parameters {
+    border-right: 0;
+    border-bottom: 1px solid #354459;
+  }
+  .workspace {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+}

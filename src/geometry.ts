@@ -22,11 +22,18 @@ const cross = (a: Vec, b: Vec): Vec => [
   a[0] * b[1] - a[1] * b[0],
 ];
 const norm = (a: Vec) => Math.hypot(...a);
+export const triangleCount = (e: GeometryElement) =>
+  e.triangleCount ??
+  (e.indices ? e.indices.length / 3 : e.triangles.length / 9);
+const coordinate = (e: GeometryElement, i: number, k: number) =>
+  e.indices && e.vertices
+    ? e.vertices[e.indices[i * 3 + Math.floor(k / 3)] * 3 + (k % 3)]
+    : e.triangles[i * 9 + k];
 const tri = (e: GeometryElement, i: number): Vec[] =>
   [0, 3, 6].map((k) => [
-    e.triangles[i * 9 + k],
-    e.triangles[i * 9 + k + 1],
-    e.triangles[i * 9 + k + 2],
+    coordinate(e, i, k),
+    coordinate(e, i, k + 1),
+    coordinate(e, i, k + 2),
   ]);
 export function bounds(points: ArrayLike<number>): Box {
   const min: Vec = [Infinity, Infinity, Infinity],
@@ -48,7 +55,7 @@ function build(e: GeometryElement, ids: number[]): Node {
   for (const i of ids)
     for (let j = 0; j < 9; j++) {
       const k = j % 3,
-        v = e.triangles[i * 9 + j];
+        v = coordinate(e, i, j);
       box.min[k] = Math.min(box.min[k], v);
       box.max[k] = Math.max(box.max[k], v);
     }
@@ -56,9 +63,9 @@ function build(e: GeometryElement, ids: number[]): Node {
   const lengths = box.max.map((v, k) => v - box.min[k]);
   const axis = lengths.indexOf(Math.max(...lengths));
   const center = (i: number) =>
-    e.triangles[i * 9 + axis] +
-    e.triangles[i * 9 + axis + 3] +
-    e.triangles[i * 9 + axis + 6];
+    coordinate(e, i, axis) +
+    coordinate(e, i, axis + 3) +
+    coordinate(e, i, axis + 6);
   ids.sort((a, b) => center(a) - center(b));
   const mid = ids.length >> 1;
   return {
@@ -74,6 +81,32 @@ function* query(n: Node, box: Box, eps: number): Generator<number> {
     yield* query(n.left!, box, eps);
     yield* query(n.right!, box, eps);
   }
+}
+function buildElements(elements: GeometryElement[], ids: number[]): Node {
+  const box: Box = {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity],
+  };
+  for (const id of ids)
+    for (let k = 0; k < 3; k++) {
+      box.min[k] = Math.min(box.min[k], elements[id].bounds.min[k]);
+      box.max[k] = Math.max(box.max[k], elements[id].bounds.max[k]);
+    }
+  if (ids.length <= 16) return { ...box, ids };
+  const spans = box.max.map((v, k) => v - box.min[k]),
+    axis = spans.indexOf(Math.max(...spans));
+  ids.sort(
+    (a, b) =>
+      elements[a].bounds.min[axis] +
+      elements[a].bounds.max[axis] -
+      (elements[b].bounds.min[axis] + elements[b].bounds.max[axis]),
+  );
+  const mid = ids.length >> 1;
+  return {
+    ...box,
+    left: buildElements(elements, ids.slice(0, mid)),
+    right: buildElements(elements, ids.slice(mid)),
+  };
 }
 function segmentTriangle(
   a: Vec,
@@ -231,6 +264,7 @@ export async function calculate(
   check: Check,
   progress: (p: RunProgress) => void,
   aborted: () => boolean,
+  load?: (id: string) => Promise<GeometryElement>,
 ): Promise<Clash[]> {
   const eps = check.precision / 1000;
   if (!Number.isFinite(eps) || eps <= 0)
@@ -255,7 +289,7 @@ export async function calculate(
     if (!n) {
       n = build(
         e,
-        Array.from({ length: e.triangles.length / 9 }, (_, i) => i),
+        Array.from({ length: triangleCount(e) }, (_, i) => i),
       );
       trees.set(e.id, n);
     }
@@ -266,12 +300,12 @@ export async function calculate(
     let s = signatures.get(e.id);
     if (s !== undefined) return s;
     const rows: string[] = [];
-    for (let i = 0; i < e.triangles.length; i += 9) {
+    for (let i = 0; i < triangleCount(e); i++) {
       rows.push(
         [0, 3, 6]
           .map((j) =>
             [0, 1, 2]
-              .map((k) => Math.round(e.triangles[i + j + k] / eps))
+              .map((k) => Math.round(coordinate(e, i, j + k) / eps))
               .join(","),
           )
           .sort()
@@ -284,47 +318,76 @@ export async function calculate(
     return s;
   };
   const found: Clash[] = [],
-    seen = new Set<string>(),
-    sorted = b.slice().sort((x, y) => x.bounds.min[0] - y.bounds.min[0]);
-  let pairs = 0;
+    aIds = new Set(a.map((e) => e.id)),
+    bIds = new Set(b.map((e) => e.id)),
+    elementTree = buildElements(
+      b,
+      b.map((_, i) => i),
+    );
+  const cache = new Map<string, GeometryElement>();
+  let bytes = 0;
+  const size = (e: GeometryElement) =>
+    e.triangles.byteLength +
+    (e.vertices?.byteLength || 0) +
+    (e.indices?.byteLength || 0) +
+    triangleCount(e) * 32;
+  async function hydrate(meta: GeometryElement, keep?: string) {
+    if (!load) return meta;
+    let value = cache.get(meta.id);
+    if (value) {
+      cache.delete(meta.id);
+      cache.set(meta.id, value);
+      return value;
+    }
+    for (const [id, e] of cache) {
+      if (id !== keep && bytes > 96 * 1024 * 1024) {
+        cache.delete(id);
+        bytes -= size(e);
+        trees.delete(id);
+        signatures.delete(id);
+      }
+    }
+    value = await load(meta.id);
+    cache.set(meta.id, value);
+    bytes += size(value);
+    return value;
+  }
   for (let ai = 0; ai < a.length; ai++) {
-    const x = a[ai];
+    const xm = a[ai];
     progress({
       phase: "Проверка пар",
       done: ai,
       total: a.length,
       found: found.length,
     });
-    for (const y of sorted) {
-      if (y.bounds.min[0] > x.bounds.max[0] + eps) break;
+    for (const bi of query(elementTree, xm.bounds, eps)) {
+      const ym = b[bi];
       await checkpoint();
-      if (x.id === y.id || !overlap(x.bounds, y.bounds, eps)) continue;
-      if (check.ignoreSameModel && x.modelId === y.modelId) continue;
+      if (xm.id === ym.id || !overlap(xm.bounds, ym.bounds, eps)) continue;
+      if (check.ignoreSameModel && xm.modelId === ym.modelId) continue;
       if (
         check.ignoreSameGroup &&
-        x.modelId === y.modelId &&
-        x.properties["Объект"] &&
-        x.properties["Объект"] === y.properties["Объект"]
+        xm.modelId === ym.modelId &&
+        xm.properties["Объект"] &&
+        xm.properties["Объект"] === ym.properties["Объект"]
       )
         continue;
       if (
         check.equalProperty &&
-        x.properties[check.equalProperty] !== undefined &&
-        x.properties[check.equalProperty] === y.properties[check.equalProperty]
+        xm.properties[check.equalProperty] !== undefined &&
+        xm.properties[check.equalProperty] ===
+          ym.properties[check.equalProperty]
       )
         continue;
-      const id = pairKey(x.id, y.id);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (++pairs > 2000000)
-        throw Error(
-          "Слишком много близких пар. Уточните выборки и запустите проверку снова. Предыдущие результаты сохранены.",
-        );
+      if (xm.id > ym.id && aIds.has(ym.id) && bIds.has(xm.id)) continue;
+      const id = pairKey(xm.id, ym.id);
+      const x = await hydrate(xm),
+        y = await hydrate(ym, xm.id);
       let point: Vec | undefined,
         kind: Clash["kind"] = "surface";
       if (check.type === "duplicates") {
         if (
-          x.triangles.length !== y.triangles.length ||
+          triangleCount(x) !== triangleCount(y) ||
           x.bounds.min.some(
             (v, k) =>
               Math.abs(v - y.bounds.min[k]) > eps ||
@@ -339,7 +402,7 @@ export async function calculate(
       } else {
         const xt = getTree(x),
           yt = getTree(y);
-        for (let i = 0; i < x.triangles.length / 9 && !point; i++) {
+        for (let i = 0; i < triangleCount(x) && !point; i++) {
           const t = tri(x, i),
             box = bounds(t.flat());
           for (const j of query(yt, box, eps)) {
@@ -365,7 +428,7 @@ export async function calculate(
             [y, x, xt],
           ] as const) {
             if (!other.closed) continue;
-            for (let i = 0; i < first.triangles.length / 9 && !point; i++) {
+            for (let i = 0; i < triangleCount(first) && !point; i++) {
               const t = tri(first, i),
                 center = t[0].map(
                   (_, k) => (t[0][k] + t[1][k] + t[2][k]) / 3,

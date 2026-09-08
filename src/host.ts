@@ -1,6 +1,7 @@
 import { DwgType } from "albatros/enums";
 import { Clash, GeometryElement, Vec } from "./domain";
 import { bounds } from "./geometry";
+import { captureViewport } from "./snapshot";
 export interface Snapshot {
   elements: GeometryElement[];
   fingerprint: string;
@@ -34,6 +35,7 @@ function flatten(
       flatten(v, prefix ? `${prefix}.${key}` : key, out, depth + 1);
 }
 export class ModelHost {
+  private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
   private overlay?: { view: CadViewContext; layer: CadViewLayer };
   private pointView?: CadViewContext;
@@ -49,6 +51,11 @@ export class ModelHost {
   }
   isCurrent() {
     return this.scannedApp === this.app && this.scannedView === this.view;
+  }
+  canLocate(clash: Clash) {
+    return (
+      this.isCurrent() && this.refs.has(clash.a.id) && this.refs.has(clash.b.id)
+    );
   }
   async scan(
     status: (s: string) => void,
@@ -66,8 +73,7 @@ export class ModelHost {
       elements: GeometryElement[] = [],
       refs = new Map<string, DwgModel3d[]>();
     const visited = new Set<Drawing>();
-    let verticesTotal = 0,
-      hash = 2166136261;
+    let hash = 2166136261;
     const hashText = (s: string) => {
       for (let i = 0; i < s.length; i++)
         hash = Math.imul(hash ^ s.charCodeAt(i), 16777619);
@@ -118,9 +124,11 @@ export class ModelHost {
           warnings.push(`${modelName} / ${key}: часть свойств недоступна.`);
         }
         const guid =
+          props["ifc.id"] ||
           Object.entries(props).find(([k]) =>
             /(^|\.)(globalid|ifcguid|guid)$/i.test(k),
-          )?.[1] || "";
+          )?.[1] ||
+          "";
         const name = layer?.name || objects[0].$id || "Элемент";
         const id = JSON.stringify([modelId, key]);
         Object.assign(props, {
@@ -129,55 +137,67 @@ export class ModelHost {
           GUID: guid,
           Объект: layer?.UUID || key,
         });
-        const coords: number[] = [];
+        const box = {
+          min: [Infinity, Infinity, Infinity] as Vec,
+          max: [-Infinity, -Infinity, -Infinity] as Vec,
+        };
         let closed = true,
-          invalid = false;
+          invalid = false,
+          triangleCount = 0;
         for (const object of objects) {
           closed &&= object.isClosed;
           for (const mesh of Object.values(object.meshes)) {
             const g = mesh.geometry;
-            if (!g) {
+            if (!g || g.indices.length % 3) {
               invalid = true;
               continue;
             }
             closed &&= mesh.isClosed;
-            const { vertices, indices } = g;
-            if (indices.length % 3) {
-              invalid = true;
-              continue;
-            }
-            for (let i = 0; i < indices.length; i += 3) {
-              const triangle: number[] = [];
-              for (let j = 0; j < 3; j++) {
-                const k = indices[i + j] * 3;
-                const p: Vec = [vertices[k], vertices[k + 1], vertices[k + 2]];
-                Math3d.mat4.mulv3(p, object.matrix, p);
-                triangle.push(...p);
+            triangleCount += g.indices.length / 3;
+            for (let k = 0; k < g.vertices.length; k += 3) {
+              const p: Vec = [
+                g.vertices[k],
+                g.vertices[k + 1],
+                g.vertices[k + 2],
+              ];
+              Math3d.mat4.mulv3(p, object.matrix, p);
+              if (!p.every(Number.isFinite)) {
+                invalid = true;
+                continue;
               }
-              if (triangle.every(Number.isFinite)) coords.push(...triangle);
-              else invalid = true;
-              if (i % 30000 === 0) {
+              for (let a = 0; a < 3; a++) {
+                box.min[a] = Math.min(box.min[a], p[a]);
+                box.max[a] = Math.max(box.max[a], p[a]);
+              }
+              hashText(p.join(","));
+              if (k % 60000 === 0) {
                 status(
-                  `Чтение геометрии: ${modelName} · ${elements.length} элементов`,
+                  "Индексирование: " +
+                    modelName +
+                    " · " +
+                    elements.length +
+                    " элементов",
                 );
+                await new Promise((r) => setTimeout(r, 0));
+                if (aborted()) throw Error("Чтение моделей отменено.");
+              }
+            }
+            for (let k = 0; k < g.indices.length; k++) {
+              hash = Math.imul(hash ^ g.indices[k], 16777619);
+              if (k % 150000 === 0) {
                 await new Promise((r) => setTimeout(r, 0));
                 if (aborted()) throw Error("Чтение моделей отменено.");
               }
             }
           }
         }
-        if (invalid || !coords.length) {
+        if (invalid || !triangleCount) {
           warnings.push(
-            `${modelName} / ${name}: геометрия отсутствует или неполна.`,
+            modelName + " / " + name + ": геометрия отсутствует или неполна.",
           );
-          if (!coords.length) continue;
+          if (!triangleCount) continue;
           closed = false;
         }
-        verticesTotal += coords.length;
-        if (verticesTotal > 54000000)
-          throw Error(
-            "Модели содержат более 6 млн треугольников. Откройте меньший состав моделей.",
-          );
         const e: GeometryElement = {
           id,
           name,
@@ -187,11 +207,12 @@ export class ModelHost {
           properties: props,
           hidden:
             hidden || !!layer?.resolveHidden() || !!layer?.resolveDisabled(),
-          triangles: new Float64Array(coords),
+          triangles: new Float64Array(0),
+          triangleCount,
           closed,
-          bounds: bounds(coords),
+          bounds: box,
         };
-        hashText(JSON.stringify([id, props, e.hidden, coords]));
+        hashText(JSON.stringify([id, props, e.hidden]));
         elements.push(e);
         refs.set(id, objects);
       }
@@ -219,6 +240,7 @@ export class ModelHost {
       );
     this.clear();
     this.refs = refs;
+    this.metadata = new Map(elements.map((e) => [e.id, e]));
     this.scannedApp = app;
     this.scannedView = view;
     return {
@@ -227,6 +249,54 @@ export class ModelHost {
       warnings: [...new Set(warnings)],
       models,
     };
+  }
+  async geometry(id: string, aborted: () => boolean): Promise<GeometryElement> {
+    if (!this.isCurrent()) throw Error("Активная модель изменилась.");
+    const meta = this.metadata.get(id),
+      objects = this.refs.get(id);
+    if (!meta || !objects) throw Error("Элемент отсутствует.");
+    const chunks = objects.flatMap((object) =>
+      Object.values(object.meshes).map((mesh) => ({
+        object,
+        g: mesh.geometry,
+      })),
+    );
+    let vertexLength = 0,
+      indexLength = 0;
+    for (const { g } of chunks) {
+      if (!g) throw Error("Геометрия недоступна.");
+      vertexLength += g.vertices.length;
+      indexLength += g.indices.length;
+    }
+    const vertices = new Float64Array(vertexLength),
+      indices = new Uint32Array(indexLength);
+    let vo = 0,
+      io = 0;
+    for (const { object, g } of chunks) {
+      if (!g) throw Error("Геометрия недоступна.");
+      for (let k = 0; k < g.vertices.length; k += 3) {
+        const p: Vec = [g.vertices[k], g.vertices[k + 1], g.vertices[k + 2]];
+        Math3d.mat4.mulv3(p, object.matrix, p);
+        vertices.set(p, vo + k);
+        if (k % 60000 === 0) {
+          await new Promise((r) => setTimeout(r, 0));
+          if (aborted() || !this.isCurrent())
+            throw Error("Чтение геометрии отменено.");
+        }
+      }
+      for (let k = 0; k < g.indices.length; k++) {
+        if (g.indices[k] >= g.vertices.length / 3)
+          throw Error("Некорректный индекс геометрии.");
+        indices[io + k] = vo / 3 + g.indices[k];
+        if (k % 150000 === 0) {
+          await new Promise((r) => setTimeout(r, 0));
+          if (aborted()) throw Error("Чтение геометрии отменено.");
+        }
+      }
+      vo += g.vertices.length;
+      io += g.indices.length;
+    }
+    return { ...meta, vertices, indices };
   }
   selected(): string[] {
     if (!this.isCurrent())
@@ -257,14 +327,14 @@ export class ModelHost {
       this.pointView = undefined;
     }
   }
-  focus(clash: Clash, distance: number) {
+  focus(clash: Clash, distance: number, animate = true) {
     if (!this.isCurrent())
       throw Error("Обновите модели текущего проекта перед переходом.");
     if (!Number.isFinite(distance) || distance < 0.5)
       throw Error("Дистанция камеры должна быть не менее 0,5 м.");
     if (!this.refs.has(clash.a.id) || !this.refs.has(clash.b.id))
       throw Error("Один из элементов отсутствует в загруженных моделях.");
-    this.select([clash.a.id, clash.b.id]);
+    this.view!.layer.clearSelected();
     this.highlight([clash.a.id, clash.b.id]);
     const p = clash.point,
       v = this.view!;
@@ -276,7 +346,7 @@ export class ModelHost {
       p.map((x, i) => x - dir[i] * distance) as Vec,
       dir,
       [0, 0, 1],
-      true,
+      animate,
       p,
     );
   }
@@ -286,23 +356,58 @@ export class ModelHost {
       this.overlay = undefined;
     }
     const view = this.view!,
-      objects = ids.flatMap((id) => this.refs.get(id) || []);
-    const paint = (dc: DeviceContext) => {
-      const old = dc.color;
-      dc.color = 0xff3636ff;
+      objects = ids.flatMap((id, side) =>
+        (this.refs.get(id) || []).map((obj) => ({ obj, side })),
+      );
+    const surfaces = objects.flatMap(({ obj, side }) =>
+      Object.values(obj.meshes).flatMap((mesh) => {
+        const g = mesh.geometry;
+        if (!g) return [];
+        const color = side === 0 ? 0xff3636ff : 0xffff9d2b;
+        const indices = new Uint32Array(g.indices.length * 2);
+        indices.set(g.indices);
+        for (let i = 0; i < g.indices.length; i += 3) {
+          indices[g.indices.length + i] = g.indices[i];
+          indices[g.indices.length + i + 1] = g.indices[i + 2];
+          indices[g.indices.length + i + 2] = g.indices[i + 1];
+        }
+        const geometry: UuidGeometry3d = {
+          uuid: "nashepo.checks." + side + "." + g.uuid,
+          vertices: g.vertices,
+          normals: g.normals,
+          bounds: g.bounds,
+          indices,
+          colors: new Uint32Array(g.vertices.length / 3).fill(color),
+        };
+        return [{ obj, geometry, color }];
+      }),
+    );
+    const paint = (dc: DeviceContext, camera: Camera) => {
+      const old = dc.color,
+        material = dc.rasterizer.material;
+      dc.rasterizer.material = undefined;
+      const inverse = Math3d.mat4.inverse(Math3d.mat4.alloc(), camera.view);
       try {
-        for (const obj of objects) {
+        for (const { obj, geometry, color } of surfaces) {
+          dc.color = color;
           dc.pushMatrix();
           try {
-            dc.multMatrix(obj.matrix);
-            for (const mesh of Object.values(obj.meshes))
-              if (mesh.geometry) dc.mesh(mesh.geometry);
+            const matrix = Math3d.mat4.alloc();
+            for (let i = 0; i < 16; i++) matrix[i] = obj.matrix[i];
+            // A small view-facing offset avoids fighting the original surface's depth.
+            const offset = 0.001;
+            matrix[12] += inverse[8] * offset;
+            matrix[13] += inverse[9] * offset;
+            matrix[14] += inverse[10] * offset;
+            dc.multMatrix(matrix);
+            dc.mesh(geometry);
           } finally {
             dc.popMatrix();
           }
         }
       } finally {
         dc.color = old;
+        dc.rasterizer.material = material;
       }
     };
     const layer: CadViewLayer = {
@@ -330,6 +435,23 @@ export class ModelHost {
     view.layer.addLayer(layer);
     this.overlay = { view, layer };
     view.invalidate();
+  }
+  async snapshot(
+    clash: Clash,
+    distance: number,
+    aborted: () => boolean,
+    current = false,
+  ): Promise<string> {
+    if (!this.isCurrent())
+      throw Error("Обновите модели перед созданием снимков.");
+    if (!this.canLocate(clash))
+      throw Error("Элементы результата отсутствуют в открытых моделях.");
+    if (!current) this.focus(clash, distance, false);
+    else {
+      this.view!.layer.clearSelected();
+      this.highlight([clash.a.id, clash.b.id]);
+    }
+    return captureViewport(this.view!, () => aborted() || !this.isCurrent());
   }
   markers(
     results: Clash[],

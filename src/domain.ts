@@ -1,4 +1,7 @@
 export type Vec = [number, number, number];
+export const isSnapshot = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(value);
 export type State =
   | "new"
   | "active"
@@ -26,6 +29,7 @@ export interface Selection {
   mode: "all" | "any";
   include: string[];
   exclude: string[];
+  manualOnly?: boolean;
 }
 export interface ElementInfo {
   id: string;
@@ -38,6 +42,9 @@ export interface ElementInfo {
 }
 export interface GeometryElement extends ElementInfo {
   triangles: Float64Array;
+  vertices?: Float64Array;
+  indices?: Uint32Array;
+  triangleCount?: number;
   closed: boolean;
   bounds: { min: Vec; max: Vec };
 }
@@ -52,6 +59,7 @@ export interface Clash {
   assignee: string;
   firstSeen: string;
   lastSeen: string;
+  image?: string;
 }
 export interface Check {
   id: string;
@@ -103,6 +111,9 @@ export const newCheck = (): Check => ({
 });
 export const info = ({
   triangles: _,
+  vertices: _v,
+  indices: _i,
+  triangleCount: _n,
   closed: __,
   bounds: ___,
   ...rest
@@ -110,6 +121,7 @@ export const info = ({
 export function matches(e: ElementInfo, s: Selection): boolean {
   if (s.exclude.includes(e.id)) return false;
   if (s.include.includes(e.id)) return true;
+  if (s.manualOnly) return false;
   if (s.models.length && !s.models.includes(e.modelId)) return false;
   const pass = (c: Condition) => {
     const raw = e.properties[c.field];
@@ -228,6 +240,7 @@ export function readProject(text: string): Project {
     for (const s of [c.a, c.b])
       if (
         !s ||
+        (s.manualOnly !== undefined && typeof s.manualOnly !== "boolean") ||
         !["all", "any"].includes(s.mode) ||
         ![s.models, s.include, s.exclude].every(
           (a) => Array.isArray(a) && a.every((v) => typeof v === "string"),
@@ -243,6 +256,8 @@ export function readProject(text: string): Project {
       )
         throw Error("Некорректная выборка.");
     for (const r of c.results) {
+      if (r?.image !== undefined && !isSnapshot(r.image))
+        throw Error("Некорректный снимок результата.");
       if (
         !r ||
         typeof r.id !== "string" ||
