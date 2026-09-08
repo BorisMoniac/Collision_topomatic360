@@ -10,6 +10,16 @@ export interface Snapshot {
 }
 const markerLayer = "nashepo.checks.points";
 const overlayId = "nashepo.checks.highlight";
+function checkpoint(aborted: () => boolean) {
+  let tick = performance.now();
+  return async () => {
+    if (aborted()) throw Error("Операция отменена.");
+    if (performance.now() - tick >= 16) {
+      await new Promise((r) => setTimeout(r, 0));
+      tick = performance.now();
+    }
+  };
+}
 function flatten(
   value: unknown,
   prefix: string,
@@ -74,6 +84,10 @@ export class ModelHost {
       refs = new Map<string, DwgModel3d[]>();
     const visited = new Set<Drawing>();
     let hash = 2166136261;
+    const yieldWork = checkpoint(
+      () => aborted() || app !== this.app || view !== this.view,
+    );
+    let lastStatus = -Infinity;
     const hashText = (s: string) => {
       for (let i = 0; i < s.length; i++)
         hash = Math.imul(hash ^ s.charCodeAt(i), 16777619);
@@ -171,21 +185,24 @@ export class ModelHost {
               }
               hashText(p.join(","));
               if (k % 60000 === 0) {
-                status(
-                  "Индексирование: " +
-                    modelName +
-                    " · " +
-                    elements.length +
-                    " элементов",
-                );
-                await new Promise((r) => setTimeout(r, 0));
+                if (performance.now() - lastStatus > 200) {
+                  lastStatus = performance.now();
+                  status(
+                    "Индексирование: " +
+                      modelName +
+                      " · " +
+                      elements.length +
+                      " элементов",
+                  );
+                }
+                await yieldWork();
                 if (aborted()) throw Error("Чтение моделей отменено.");
               }
             }
             for (let k = 0; k < g.indices.length; k++) {
               hash = Math.imul(hash ^ g.indices[k], 16777619);
               if (k % 150000 === 0) {
-                await new Promise((r) => setTimeout(r, 0));
+                await yieldWork();
                 if (aborted()) throw Error("Чтение моделей отменено.");
               }
             }
@@ -251,6 +268,7 @@ export class ModelHost {
     };
   }
   async geometry(id: string, aborted: () => boolean): Promise<GeometryElement> {
+    const yieldWork = checkpoint(() => aborted() || !this.isCurrent());
     if (!this.isCurrent()) throw Error("Активная модель изменилась.");
     const meta = this.metadata.get(id),
       objects = this.refs.get(id);
@@ -279,7 +297,7 @@ export class ModelHost {
         Math3d.mat4.mulv3(p, object.matrix, p);
         vertices.set(p, vo + k);
         if (k % 60000 === 0) {
-          await new Promise((r) => setTimeout(r, 0));
+          await yieldWork();
           if (aborted() || !this.isCurrent())
             throw Error("Чтение геометрии отменено.");
         }
@@ -289,7 +307,7 @@ export class ModelHost {
           throw Error("Некорректный индекс геометрии.");
         indices[io + k] = vo / 3 + g.indices[k];
         if (k % 150000 === 0) {
-          await new Promise((r) => setTimeout(r, 0));
+          await yieldWork();
           if (aborted()) throw Error("Чтение геометрии отменено.");
         }
       }

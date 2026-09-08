@@ -352,14 +352,18 @@ export async function calculate(
     bytes += size(value);
     return value;
   }
+  let lastProgress = -Infinity;
   for (let ai = 0; ai < a.length; ai++) {
     const xm = a[ai];
-    progress({
-      phase: "Проверка пар",
-      done: ai,
-      total: a.length,
-      found: found.length,
-    });
+    if (performance.now() - lastProgress > 150) {
+      lastProgress = performance.now();
+      progress({
+        phase: "Проверка пар",
+        done: ai,
+        total: a.length,
+        found: found.length,
+      });
+    }
     for (const bi of query(elementTree, xm.bounds, eps)) {
       const ym = b[bi];
       await checkpoint();

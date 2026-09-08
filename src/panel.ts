@@ -1,4 +1,5 @@
 import { helpHtml } from "./help";
+import { version as pluginVersion } from "../package.json";
 import {
   Check,
   Clash,
@@ -40,7 +41,7 @@ export function mountPanel(
   const check = () => saved.checks.find((c) => c.id === current);
   const q = <T extends HTMLElement = HTMLElement>(id: string) =>
     root.querySelector<T>("#" + id)!;
-  root.innerHTML = `<style>${css}</style><main><header><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>0.2.0</small></div><button id="scan">Обновить модели</button><button id="new" class="primary">＋ Проверка</button><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="settings">⚙</button><button id="help">Справка</button><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Обновить модели».</div><div class="workspace"><aside><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><button id="all">Запустить все</button></aside><section class="main"><div class="test-toolbar"><input id="name" aria-label="Имя проверки" placeholder="Имя проверки"><button id="copy">Копировать</button><button id="delete">Удалить</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button></div><div id="tabs" class="tabs">${[
+  root.innerHTML = `<style>${css}</style><main><header><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>${pluginVersion}</small></div><button id="scan">Обновить модели</button><button id="new" class="primary">＋ Проверка</button><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="settings">⚙</button><button id="help">Справка</button><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Обновить модели».</div><div class="workspace"><aside><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><button id="all">Запустить все</button></aside><section class="main"><div class="test-toolbar"><input id="name" aria-label="Имя проверки" placeholder="Имя проверки"><button id="copy">Копировать</button><button id="delete">Удалить</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button></div><div id="tabs" class="tabs">${[
     ["rules", "Правила"],
     ["select", "Выбрать"],
     ["results", "Результаты"],
