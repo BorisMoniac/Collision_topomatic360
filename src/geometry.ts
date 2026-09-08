@@ -253,6 +253,112 @@ function inside(p: Vec, e: GeometryElement, tree: Node, eps: number): boolean {
     }
   return n % 2 === 1;
 }
+function boxDistance(p: Vec, box: Box): number {
+  return Math.hypot(
+    ...p.map((v, k) => Math.max(box.min[k] - v, 0, v - box.max[k])),
+  );
+}
+function pointTriangleDistance(p: Vec, t: Vec[]): number {
+  const ab = sub(t[1], t[0]),
+    ac = sub(t[2], t[0]),
+    ap = sub(p, t[0]);
+  const d1 = dot(ab, ap),
+    d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return norm(ap);
+  const bp = sub(p, t[1]),
+    d3 = dot(ab, bp),
+    d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return norm(bp);
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    return norm(sub(p, add(t[0], ab, v)));
+  }
+  const cp = sub(p, t[2]),
+    d5 = dot(ab, cp),
+    d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return norm(cp);
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    return norm(sub(p, add(t[0], ac, w)));
+  }
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const edge = sub(t[2], t[1]),
+      w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+    return norm(sub(p, add(t[1], edge, w)));
+  }
+  const n = cross(ab, ac);
+  return Math.abs(dot(ap, n)) / Math.max(norm(n), 1e-30);
+}
+function nearestSurface(p: Vec, e: GeometryElement, tree: Node): number {
+  let best = Infinity;
+  const visit = (node: Node) => {
+    if (boxDistance(p, node) >= best) return;
+    if (node.ids) {
+      for (const id of node.ids)
+        best = Math.min(best, pointTriangleDistance(p, tri(e, id)));
+      return;
+    }
+    const left = node.left!,
+      right = node.right!;
+    if (boxDistance(p, left) < boxDistance(p, right)) {
+      visit(left);
+      visit(right);
+    } else {
+      visit(right);
+      visit(left);
+    }
+  };
+  visit(tree);
+  return best;
+}
+async function penetrationEstimate(
+  x: GeometryElement,
+  y: GeometryElement,
+  xt: Node,
+  yt: Node,
+  point: Vec,
+  eps: number,
+  checkpoint: () => Promise<void>,
+): Promise<number> {
+  if (!x.closed || !y.closed) return 0;
+  let depth = 0;
+  const measure = (p: Vec, other: GeometryElement, tree: Node) => {
+    if (inside(p, other, tree, eps))
+      depth = Math.max(depth, nearestSurface(p, other, tree));
+  };
+  measure(point, x, xt);
+  measure(point, y, yt);
+  let sampled = 0;
+  for (const [first, other, tree] of [
+    [x, y, yt],
+    [y, x, xt],
+  ] as const) {
+    const count = triangleCount(first),
+      step = Math.max(1, Math.floor(count / 1024));
+    for (let i = 0; i < count; i += step) {
+      const t = tri(first, i),
+        center = t[0].map((_, k) => (t[0][k] + t[1][k] + t[2][k]) / 3) as Vec,
+        ab = t[0].map((_, k) => (t[0][k] + t[1][k]) / 2) as Vec,
+        bc = t[0].map((_, k) => (t[1][k] + t[2][k]) / 2) as Vec,
+        ca = t[0].map((_, k) => (t[2][k] + t[0][k]) / 2) as Vec;
+      for (const p of [t[0], t[1], t[2], ab, bc, ca, center])
+        measure(p, other, tree);
+      if (sampled++ % 32 === 0) await checkpoint();
+    }
+  }
+  if (depth <= eps) {
+    const overlaps = x.bounds.min.map(
+      (v, k) =>
+        Math.min(x.bounds.max[k], y.bounds.max[k]) -
+        Math.max(v, y.bounds.min[k]),
+    );
+    depth = Math.max(0, Math.min(...overlaps));
+  }
+  return depth * 1000;
+}
 export interface RunProgress {
   phase: string;
   done: number;
@@ -388,7 +494,8 @@ export async function calculate(
       const x = await hydrate(xm),
         y = await hydrate(ym, xm.id);
       let point: Vec | undefined,
-        kind: Clash["kind"] = "surface";
+        kind: Clash["kind"] = "surface",
+        penetrationMm = 0;
       if (check.type === "duplicates") {
         if (
           triangleCount(x) !== triangleCount(y) ||
@@ -447,6 +554,18 @@ export async function calculate(
             }
             if (point) break;
           }
+        if (point)
+          penetrationMm = await penetrationEstimate(
+            x,
+            y,
+            xt,
+            yt,
+            point,
+            eps,
+            checkpoint,
+          );
+        if (point && penetrationMm + check.precision < check.minPenetration)
+          continue;
       }
       if (point) {
         found.push({
@@ -460,6 +579,7 @@ export async function calculate(
           assignee: "",
           firstSeen: "",
           lastSeen: "",
+          penetrationMm,
         });
         if (found.length >= 50000)
           throw Error(

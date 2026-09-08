@@ -431,6 +431,12 @@ dialog a {
   color: #f2c94c;
   margin-right: 12px;
 }
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
 @container (max-width:950px) {
   .workspace {
     grid-template-columns: 185px minmax(0, 1fr);
@@ -517,6 +523,48 @@ label {
 .selection-mode {
   font-size: 12px;
   color: #b6c4d5;
+}
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.preset-row select {
+  flex: 1 1 160px;
+}
+.preset-row button {
+  padding: 5px 7px;
+  font-size: 12px;
+}
+.model-list {
+  height: 150px;
+  overflow: auto;
+  border: 1px solid #425165;
+  border-radius: 6px;
+  background: #111a24;
+  padding: 5px;
+  margin-bottom: 5px;
+}
+.model-list label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 5px;
+  color: #dbe5f0;
+  overflow-wrap: anywhere;
+}
+.model-list label:hover {
+  background: #253140;
+}
+.model-list .model-all {
+  position: sticky;
+  top: -5px;
+  z-index: 1;
+  background: #1f2b39;
+  border-bottom: 1px solid #425165;
+  font-weight: 600;
 }
 .legend {
   display: flex;

@@ -4,6 +4,7 @@ import {
   Check,
   Clash,
   Condition,
+  ParameterSet,
   Project,
   Selection,
   State,
@@ -20,12 +21,23 @@ import EngineWorker from "./engine.worker?worker&inline";
 import { download, escape as e, reportHtml, viewerSession } from "./export";
 import { brandLogo } from "./brand";
 import css from "./style.css?inline";
-const saved: Project = { format: "nashepo.checks", version: 1, checks: [] };
+const projects = new WeakMap<object, Project>();
+const emptyProject = (): Project => ({
+  format: "nashepo.checks",
+  version: 1,
+  checks: [],
+  sets: [],
+});
 export function mountPanel(
   container: HTMLElement,
   host: ModelHost,
 ): () => void {
   const root = container.shadowRoot || container.attachShadow({ mode: "open" });
+  let projectToken = host.projectToken(),
+    saved = projectToken
+      ? projects.get(projectToken) || emptyProject()
+      : emptyProject();
+  if (projectToken) projects.set(projectToken, saved);
   let snapshot: Snapshot | undefined,
     current = saved.checks[0]?.id || "",
     tab = "select",
@@ -50,7 +62,11 @@ export function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog></main>`;
+    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор параметров</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+  const clearButton = document.createElement("button");
+  clearButton.id = "clear-project";
+  clearButton.textContent = "Очистить проект";
+  q("save").after(clearButton);
   const note = (text: string, error = false) => {
     q("notice").textContent = text;
     q("notice").classList.toggle("error", error);
@@ -62,9 +78,53 @@ export function mountPanel(
       note(err instanceof Error ? err.message : String(err), true);
     }
   };
+  const requestSetName = () =>
+    new Promise<string | undefined>((resolve) => {
+      const dialog = q<HTMLDialogElement>("set-dialog"),
+        input = q<HTMLInputElement>("set-name");
+      let finished = false;
+      const finish = (value?: string) => {
+        if (finished) return;
+        finished = true;
+        dialog.close();
+        resolve(value);
+      };
+      input.value = "Новый набор";
+      q("set-confirm").onclick = () => {
+        const value = input.value.trim();
+        if (value) finish(value);
+        else input.focus();
+      };
+      q("set-cancel").onclick = () => finish();
+      dialog.oncancel = (event) => {
+        event.preventDefault();
+        finish();
+      };
+      dialog.showModal();
+      input.focus();
+      input.select();
+    });
   const mark = () => {
     dirty = true;
     q("dirty").textContent = "Есть несохранённые изменения";
+  };
+  const switchProject = () => {
+    const nextToken = host.projectToken();
+    if (!nextToken || nextToken === projectToken) return false;
+    if (!projectToken && (saved.checks.length || saved.sets.length))
+      projects.set(nextToken, saved);
+    else saved = projects.get(nextToken) || emptyProject();
+    projects.set(nextToken, saved);
+    projectToken = nextToken;
+    snapshot = undefined;
+    current = saved.checks[0]?.id || "";
+    selected = "";
+    checked.clear();
+    page = 0;
+    dirty = false;
+    host.clear();
+    q("dirty").textContent = "";
+    return true;
   };
   const stale = () => {
     const c = check();
@@ -89,10 +149,12 @@ export function mountPanel(
     const c = check();
     const search =
         q<HTMLInputElement>("result-search")?.value.toLowerCase() || "",
-      state = q<HTMLSelectElement>("result-state")?.value || "";
+      state = q<HTMLSelectElement>("result-state")?.value || "",
+      minDepth = Number(q<HTMLInputElement>("result-depth")?.value || 0);
     return (c?.results || []).filter(
       (r) =>
         (!state || r.state === state) &&
+        (c?.type === "duplicates" || (r.penetrationMm ?? 0) >= minDepth) &&
         (!search ||
           JSON.stringify({ ...r, image: undefined })
             .toLowerCase()
@@ -109,30 +171,63 @@ export function mountPanel(
       )
       .join("");
   }
+  function propertyValues(s: Selection, field: string) {
+    return [
+      ...new Set(
+        (snapshot?.elements || [])
+          .filter(
+            (item) =>
+              s.modelsMode !== "selected" || s.models.includes(item.modelId),
+          )
+          .map((item) => item.properties[field])
+          .filter((value): value is string => value !== undefined),
+      ),
+    ]
+      .sort()
+      .slice(0, 500);
+  }
   function renderSelection(s: Selection, side: "a" | "b") {
     const count =
       snapshot?.elements.filter(
         (x) => (check()!.includeHidden || !x.hidden) && matches(x, s),
       ).length || 0;
-    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span>${count} элементов</span></h3><p class="selection-mode">${s.manualOnly ? "Ручная выборка — только указанные элементы" : "Автоматическая выборка — модели и условия"}</p><label>Модели (Ctrl — несколько; без выбора — все)<select multiple size="8" class="models">${(snapshot?.models || []).map((m) => `<option value="${e(m.id)}" ${s.models.includes(m.id) ? "selected" : ""}>${e(m.name)}</option>`).join("")}</select></label><div class="selection-tools"><button data-selection="show">Показать выборку</button><button data-selection="only">Только выделенные</button><button data-selection="include">＋ Добавить выделенные</button><button data-selection="exclude">− Исключить выделенные</button><button data-selection="reset">Вернуть автоматический выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small><label>Условия<select class="mode"><option value="all" ${s.mode === "all" ? "selected" : ""}>Выполнены все (И)</option><option value="any" ${s.mode === "any" ? "selected" : ""}>Выполнено любое (ИЛИ)</option></select></label><div class="conditions">${s.conditions
+    const requiredModels = s.manualOnly
+        ? selectionModelIds(s)
+        : s.modelsMode === "selected"
+          ? s.models
+          : (snapshot?.models || []).map((model) => model.id),
+      countText =
+        snapshot &&
+        requiredModels.every((id) => snapshot!.indexedModelIds.includes(id))
+          ? `${count} элементов`
+          : "число после запуска";
+    const models = snapshot?.models || [],
+      all = s.modelsMode !== "selected";
+    const presets = saved.sets
       .map(
-        (c, i) =>
-          `<div class="condition" data-condition="${i}"><input class="field" list="property-fields" value="${e(c.field)}" placeholder="Свойство"><select class="op">${[
-            ["eq", "равно"],
-            ["contains", "содержит"],
-            ["ne", "не равно"],
-            ["exists", "существует"],
-            ["gt", "больше"],
-            ["lt", "меньше"],
-          ]
-            .map(
-              ([k, v]) =>
-                `<option value="${k}" ${c.op === k ? "selected" : ""}>${v}</option>`,
-            )
-            .join(
-              "",
-            )}</select><input class="value" value="${e(c.value)}" placeholder="Значение" ${c.op === "exists" ? "disabled" : ""}><button data-remove="${i}" aria-label="Удалить условие">×</button></div>`,
+        (set) =>
+          `<option value="${e(set.id)}" ${s.presetId === set.id ? "selected" : ""}>${e(set.name)}</option>`,
       )
+      .join("");
+    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span data-selection-count>${countText}</span></h3><p class="selection-mode">${s.manualOnly ? "Ручная выборка — только указанные элементы" : "Автоматическая выборка — модели и условия"}</p><div class="preset-row"><select class="preset"><option value="">Набор параметров…</option>${presets}</select><button data-selection="load-set">Применить</button><button data-selection="save-set">Сохранить как набор</button><button data-selection="delete-set" ${s.presetId ? "" : "disabled"}>Удалить</button></div><div class="model-list"><label class="model-all"><input type="checkbox" class="all-models" ${all ? "checked" : ""}> Все модели</label>${models.map((m) => `<label><input type="checkbox" class="model-check" value="${e(m.id)}" ${all || s.models.includes(m.id) ? "checked" : ""}> ${e(m.name)}</label>`).join("") || "<small>Нажмите «Обновить модели».</small>"}</div><small>Отмеченные файлы участвуют в этой стороне проверки. После выбора нажмите «Обновить модели», чтобы получить свойства и точное количество, либо сразу запустите проверку.</small><div class="selection-tools"><button data-selection="show">Показать выборку</button><button data-selection="only">Только выделенные</button><button data-selection="include">＋ Добавить выделенные</button><button data-selection="exclude">− Исключить выделенные</button><button data-selection="reset">Вернуть автоматический выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small><label>Условия<select class="mode"><option value="all" ${s.mode === "all" ? "selected" : ""}>Выполнены все (И)</option><option value="any" ${s.mode === "any" ? "selected" : ""}>Выполнено любое (ИЛИ)</option></select></label><div class="conditions">${s.conditions
+      .map((c, i) => {
+        const values = propertyValues(s, c.field);
+        return `<div class="condition" data-condition="${i}"><input class="field" list="property-fields" value="${e(c.field)}" placeholder="Свойство"><select class="op">${[
+          ["eq", "равно"],
+          ["contains", "содержит"],
+          ["ne", "не равно"],
+          ["exists", "существует"],
+          ["gt", "больше"],
+          ["lt", "меньше"],
+        ]
+          .map(
+            ([k, v]) =>
+              `<option value="${k}" ${c.op === k ? "selected" : ""}>${v}</option>`,
+          )
+          .join(
+            "",
+          )}</select><input class="value" list="values-${side}-${i}" value="${e(c.value)}" placeholder="Значение" ${c.op === "exists" ? "disabled" : ""}><datalist id="values-${side}-${i}">${values.map((value) => `<option value="${e(value)}"></option>`).join("")}</datalist><button data-remove="${i}" aria-label="Удалить условие">×</button></div>`;
+      })
       .join(
         "",
       )}</div><button data-selection="add">＋ Условие</button></article>`;
@@ -152,7 +247,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая точность; не глубина проникновения">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено.</small><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -164,7 +259,7 @@ export function mountPanel(
           .map(([k, v]) => `<option value="${k}">${v}</option>`)
           .join(
             "",
-          )}</select><button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки включены" : "○ Знаки выключены"}</button><select id="bulk-state">${Object.entries(
+          )}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Вхождение от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки включены" : "○ Знаки выключены"}</button><select id="bulk-state">${Object.entries(
           stateNames,
         )
           .map(([k, v]) => `<option value="${k}">${v}</option>`)
@@ -180,12 +275,13 @@ export function mountPanel(
     q("content").inert = busy;
   }
   function renderTable() {
-    const rows = resultRows(),
+    const c = check()!,
+      rows = resultRows(),
       pages = Math.max(1, Math.ceil(rows.length / 50));
     page = Math.max(0, Math.min(page, pages - 1));
     const visible = rows.slice(page * 50, page * 50 + 50);
     q("table").innerHTML = rows.length
-      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Вхождение, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], c.type === "duplicates" ? "—" : (r.penetrationMm ?? 0).toFixed(1), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : '<div class="empty">Нет результатов. Запустите проверку или измените фильтры.</div>';
     q("page").textContent =
       `Страница ${page + 1} из ${pages} · ${rows.length} результатов`;
@@ -196,7 +292,7 @@ export function mountPanel(
   function renderDetail() {
     const r = check()?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Сохранить текущий ракурс</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p><p>${check()?.type === "duplicates" ? "Дублирование" : `Расчётное вхождение: ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Сохранить текущий ракурс</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -220,6 +316,58 @@ export function mountPanel(
           .join("")}`
       : "<p>Выберите конфликт в таблице.</p>";
   }
+  const selectionModelIds = (s: Selection): string[] => {
+    const ids = new Set(
+      !s.manualOnly && s.modelsMode === "selected" ? s.models : [],
+    );
+    for (const id of s.include) {
+      try {
+        ids.add(String(JSON.parse(id)[0]));
+      } catch {
+        const model = snapshot?.elements.find(
+          (item) => item.id === id,
+        )?.modelId;
+        if (model) ids.add(model);
+      }
+    }
+    return [...ids];
+  };
+  const scanScope = (targets?: Check[]) => {
+    if (!targets?.length) return undefined;
+    const ids = new Set<string>();
+    for (const c of targets)
+      for (const s of [c.a, c.b]) {
+        if (!s.manualOnly && s.modelsMode !== "selected") return undefined;
+        for (const id of selectionModelIds(s)) ids.add(id);
+      }
+    return ids;
+  };
+  const refreshSelectionCounts = () => {
+    const c = check();
+    if (!c) return;
+    for (const article of root.querySelectorAll<HTMLElement>("[data-side]")) {
+      const side = article.dataset.side as "a" | "b";
+      const count =
+        snapshot?.elements.filter(
+          (item) => (c.includeHidden || !item.hidden) && matches(item, c[side]),
+        ).length || 0;
+      const requiredModels = c[side].manualOnly
+          ? selectionModelIds(c[side])
+          : c[side].modelsMode === "selected"
+            ? c[side].models
+            : (snapshot?.models || []).map((model) => model.id),
+        complete =
+          !!snapshot &&
+          requiredModels.every((id) => snapshot!.indexedModelIds.includes(id));
+      const output = article.querySelector<HTMLElement>(
+        "[data-selection-count]",
+      );
+      if (output)
+        output.textContent = complete
+          ? `${count} элементов`
+          : "число после запуска";
+    }
+  };
   function markers() {
     host.markers(resultRows(), selected, show, (id) =>
       action(() => pick(id, true)),
@@ -239,19 +387,20 @@ export function mountPanel(
       if (r) host.focus(r, Number(q<HTMLInputElement>("distance").value));
     }
   }
-  async function scan() {
-    snapshot = await host.scan(note, () => aborted);
+  async function scan(targets?: Check[], catalogOnly = false) {
+    switchProject();
+    const scope = catalogOnly ? new Set<string>() : scanScope(targets);
+    snapshot = await host.scan(note, () => aborted, scope);
     q("model-count").textContent =
-      `Моделей: ${snapshot.models.length} · элементов: ${snapshot.elements.length}`;
-    for (const c of saved.checks)
-      if (c.fingerprint && c.fingerprint !== snapshot.fingerprint)
-        c.status = "stale";
+      `Проиндексировано моделей: ${snapshot.indexedModelIds.length} из ${snapshot.models.length} · элементов: ${snapshot.elements.length}`;
     render();
     note(
-      snapshot.warnings.length
-        ? snapshot.warnings.join(" ")
-        : "Модели прочитаны. Настройте выборки и запустите проверку.",
-      !!snapshot.warnings.length,
+      snapshot.blockers.length
+        ? snapshot.blockers.join(" ")
+        : snapshot.warnings.length
+          ? `Модели прочитаны с замечаниями. ${snapshot.warnings.join(" ")}`
+          : "Модели прочитаны. Настройте выборки и запустите проверку.",
+      !!snapshot.blockers.length,
     );
   }
   const setBusy = (value: boolean) => {
@@ -266,6 +415,7 @@ export function mountPanel(
       "name",
       "run",
       "save",
+      "clear-project",
     ])
       q<HTMLInputElement>(id).disabled = value;
     q("cancel").hidden = !value;
@@ -347,6 +497,7 @@ export function mountPanel(
   }
   async function run(all = false) {
     if (busy) return;
+    switchProject();
     const targets = all
       ? [...saved.checks]
       : ([check()].filter(Boolean) as Check[]);
@@ -354,17 +505,20 @@ export function mountPanel(
     aborted = false;
     setBusy(true);
     try {
-      await scan();
+      await scan(targets);
       setBusy(true);
-      if (snapshot!.warnings.length)
+      if (snapshot!.blockers.length)
         throw Error(
           "Состав моделей прочитан не полностью. " +
-            snapshot!.warnings.join(" "),
+            snapshot!.blockers.join(" "),
         );
       for (const c of targets) {
         if (aborted) break;
         for (const s of [c.a, c.b]) {
-          if (s.models.some((id) => !snapshot!.models.some((m) => m.id === id)))
+          if (
+            s.modelsMode === "selected" &&
+            s.models.some((id) => !snapshot!.models.some((m) => m.id === id))
+          )
             throw Error(
               `${c.name}: одна из моделей выборки отсутствует. Исправьте выборку.`,
             );
@@ -399,9 +553,9 @@ export function mountPanel(
         c.lastRun = now;
         c.fingerprint = snapshot!.fingerprint;
         c.configAtRun = config;
-        c.modelsAtRun = snapshot!.models.map((m) => m.id);
+        c.modelsAtRun = [...snapshot!.indexedModelIds];
         c.status = "done";
-        c.warnings = [];
+        c.warnings = [...snapshot!.warnings];
         current = c.id;
         selected = c.results[0]?.id || "";
         checked.clear();
@@ -428,21 +582,62 @@ export function mountPanel(
       index =
         target.closest<HTMLElement>("[data-condition]")?.dataset.condition;
     const input = target as HTMLInputElement;
-    if (input.classList.contains("models")) s.manualOnly = false;
-    if (input.classList.contains("models"))
-      s.models = Array.from((target as HTMLSelectElement).selectedOptions).map(
-        (o) => o.value,
-      );
-    if (input.classList.contains("mode"))
+    const article = target.closest<HTMLElement>("[data-side]")!;
+    if (input.classList.contains("preset")) {
+      s.presetId = input.value || undefined;
+      article.querySelector<HTMLButtonElement>(
+        '[data-selection="delete-set"]',
+      )!.disabled = !s.presetId;
+      return;
+    }
+    if (input.classList.contains("all-models")) {
+      for (const item of article.querySelectorAll<HTMLInputElement>(
+        ".model-check",
+      ))
+        item.checked = input.checked;
+      s.modelsMode = input.checked ? "all" : "selected";
+      s.models = [];
+      s.manualOnly = false;
+      s.presetId = undefined;
+    }
+    if (input.classList.contains("model-check")) {
+      const boxes = [
+          ...article.querySelectorAll<HTMLInputElement>(".model-check"),
+        ],
+        values = boxes.filter((item) => item.checked).map((item) => item.value),
+        all = boxes.length > 0 && values.length === boxes.length;
+      article.querySelector<HTMLInputElement>(".all-models")!.checked = all;
+      s.modelsMode = all ? "all" : "selected";
+      s.models = all ? [] : values;
+      s.manualOnly = false;
+      s.presetId = undefined;
+    }
+    if (input.classList.contains("mode")) {
       s.mode = input.value as Selection["mode"];
+      s.presetId = undefined;
+    }
     if (index !== undefined) {
       const c = s.conditions[Number(index)];
-      if (input.classList.contains("field")) c.field = input.value;
-      if (input.classList.contains("op")) c.op = input.value as Condition["op"];
+      if (input.classList.contains("field")) {
+        c.field = input.value;
+        input
+          .closest<HTMLElement>(".condition")!
+          .querySelector("datalist")!.innerHTML = propertyValues(s, c.field)
+          .map((value) => `<option value="${e(value)}"></option>`)
+          .join("");
+      }
+      if (input.classList.contains("op")) {
+        c.op = input.value as Condition["op"];
+        const value = input
+          .closest<HTMLElement>(".condition")!
+          .querySelector<HTMLInputElement>(".value")!;
+        value.disabled = c.op === "exists";
+      }
       if (input.classList.contains("value")) c.value = input.value;
+      s.presetId = undefined;
     }
     stale();
-    render();
+    refreshSelectionCounts();
   }
   q("new").onclick = () => {
     const c = newCheck();
@@ -460,7 +655,8 @@ export function mountPanel(
       aborted = false;
       setBusy(true);
       try {
-        await scan();
+        const target = check();
+        await scan(target ? [target] : undefined, !target);
       } finally {
         setBusy(false);
         render();
@@ -532,6 +728,26 @@ export function mountPanel(
     mark();
     render();
   };
+  q("clear-project").onclick = () => {
+    if (!saved.checks.length && !saved.sets.length) return;
+    if (
+      !confirm(
+        "Очистить проверки, наборы параметров и результаты текущего проекта?",
+      )
+    )
+      return;
+    saved.checks = [];
+    saved.sets = [];
+    snapshot = undefined;
+    current = "";
+    selected = "";
+    checked.clear();
+    host.clear();
+    mark();
+    q("model-count").textContent = "Модели не прочитаны";
+    render();
+    note("Данные проверок текущего проекта очищены.");
+  };
   q("save").onclick = () => {
     download("НашеПО-проверки.json", JSON.stringify(saved, null, 2));
     dirty = false;
@@ -548,7 +764,8 @@ export function mountPanel(
         !confirm("Заменить текущие несохранённые проверки данными из файла?")
       )
         return;
-      saved.checks = incoming.checks;
+      saved = incoming;
+      if (projectToken) projects.set(projectToken, saved);
       current = saved.checks[0]?.id || "";
       selected = "";
       checked.clear();
@@ -576,6 +793,7 @@ export function mountPanel(
         [
           "type",
           "precision",
+          "min-penetration",
           "touching",
           "same-model",
           "same-group",
@@ -590,6 +808,16 @@ export function mountPanel(
             throw Error("Точность должна быть от 0,001 до 100 мм.");
           }
           c.precision = n;
+        }
+        if (t.id === "min-penetration") {
+          const n = Number(t.value);
+          if (!Number.isFinite(n) || n < 0 || n > 100000) {
+            t.value = String(c.minPenetration);
+            throw Error(
+              "Минимальное вхождение должно быть от 0 до 100 000 мм.",
+            );
+          }
+          c.minPenetration = n;
         }
         if (t.id === "type") c.type = t.value as Check["type"];
         if (t.id === "touching") c.touching = t.checked;
@@ -635,9 +863,32 @@ export function mountPanel(
       }
     });
   q("content").oninput = (event) => {
-    if ((event.target as HTMLElement).id === "result-search") {
+    const target = event.target as HTMLInputElement;
+    if (target.id === "result-search" || target.id === "result-depth") {
       page = 0;
       renderTable();
+    }
+    const c = check(),
+      value = Number(target.value);
+    if (
+      c &&
+      target.id === "precision" &&
+      Number.isFinite(value) &&
+      value >= 0.001 &&
+      value <= 100
+    ) {
+      c.precision = value;
+      stale();
+    }
+    if (
+      c &&
+      target.id === "min-penetration" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= 100000
+    ) {
+      c.minPenetration = value;
+      stale();
     }
   };
   q("content").onclick = (event) =>
@@ -651,10 +902,57 @@ export function mountPanel(
             | "a"
             | "b",
           s = c[side];
+        const scrollTop = q("content").scrollTop;
+        let affectsSelection = true;
         if (b.dataset.remove !== undefined)
           s.conditions.splice(Number(b.dataset.remove), 1);
         else
           switch (b.dataset.selection) {
+            case "load-set": {
+              const set = saved.sets.find((item) => item.id === s.presetId);
+              if (!set) throw Error("Выберите сохранённый набор параметров.");
+              Object.assign(s, structuredClone(set.selection), {
+                include: [],
+                exclude: [],
+                manualOnly: false,
+                presetId: set.id,
+              });
+              break;
+            }
+            case "save-set": {
+              if (s.manualOnly)
+                throw Error(
+                  "Ручную выборку элементов нельзя сохранить как набор параметров.",
+                );
+              const name = await requestSetName();
+              if (!name) return;
+              const set: ParameterSet = {
+                id: crypto.randomUUID(),
+                name,
+                selection: {
+                  models: [...s.models],
+                  modelsMode: s.modelsMode,
+                  conditions: structuredClone(s.conditions),
+                  mode: s.mode,
+                },
+              };
+              saved.sets.push(set);
+              s.presetId = set.id;
+              affectsSelection = false;
+              break;
+            }
+            case "delete-set": {
+              const set = saved.sets.find((item) => item.id === s.presetId);
+              if (!set) throw Error("Выберите сохранённый набор параметров.");
+              if (!confirm(`Удалить набор «${set.name}»?`)) return;
+              saved.sets = saved.sets.filter((item) => item.id !== set.id);
+              for (const item of saved.checks)
+                for (const selection of [item.a, item.b])
+                  if (selection.presetId === set.id)
+                    selection.presetId = undefined;
+              affectsSelection = false;
+              break;
+            }
             case "add":
               s.conditions.push({ field: "Имя", op: "contains", value: "" });
               break;
@@ -694,8 +992,9 @@ export function mountPanel(
               s.include = [];
               s.exclude = [];
           }
-        stale();
+        affectsSelection ? stale() : mark();
         render();
+        q("content").scrollTop = scrollTop;
         return;
       }
       if (b?.id === "prev-page") {
@@ -843,12 +1142,20 @@ export function mountPanel(
       action(() => pick(row.dataset.result!, true));
   };
   const contextTimer = setInterval(() => {
-    if (snapshot && !host.isCurrent()) {
+    if (busy) return;
+    if (switchProject()) {
+      q("model-count").textContent = "Модели не прочитаны";
+      note(
+        saved.checks.length
+          ? "Открыт другой проект. Показаны его проверки; обновите модели."
+          : "Открыт другой проект. Для него ещё нет проверок.",
+      );
+      if (!busy) render();
+    } else if (snapshot && !host.isCurrent()) {
       snapshot = undefined;
       host.clear();
-      for (const c of saved.checks) if (c.lastRun) c.status = "stale";
-      q("model-count").textContent = "Проект изменился";
-      note("Активный проект изменился. Обновите модели.");
+      q("model-count").textContent = "3D-окно изменилось";
+      note("Активное 3D-окно изменилось. Обновите модели.");
       if (!busy) render();
     }
   }, 1500);

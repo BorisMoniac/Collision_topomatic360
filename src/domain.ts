@@ -25,11 +25,18 @@ export interface Condition {
 }
 export interface Selection {
   models: string[];
+  modelsMode?: "all" | "selected";
   conditions: Condition[];
   mode: "all" | "any";
   include: string[];
   exclude: string[];
   manualOnly?: boolean;
+  presetId?: string;
+}
+export interface ParameterSet {
+  id: string;
+  name: string;
+  selection: Pick<Selection, "models" | "modelsMode" | "conditions" | "mode">;
 }
 export interface ElementInfo {
   id: string;
@@ -60,6 +67,7 @@ export interface Clash {
   firstSeen: string;
   lastSeen: string;
   image?: string;
+  penetrationMm?: number;
 }
 export interface Check {
   id: string;
@@ -68,6 +76,7 @@ export interface Check {
   a: Selection;
   b: Selection;
   precision: number;
+  minPenetration: number;
   touching: boolean;
   ignoreSameModel: boolean;
   ignoreSameGroup: boolean;
@@ -85,9 +94,11 @@ export interface Project {
   format: "nashepo.checks";
   version: 1;
   checks: Check[];
+  sets: ParameterSet[];
 }
 export const selection = (): Selection => ({
   models: [],
+  modelsMode: "all",
   conditions: [],
   mode: "all",
   include: [],
@@ -100,6 +111,7 @@ export const newCheck = (): Check => ({
   a: selection(),
   b: selection(),
   precision: 0.1,
+  minPenetration: 0,
   touching: false,
   ignoreSameModel: false,
   ignoreSameGroup: false,
@@ -122,7 +134,14 @@ export function matches(e: ElementInfo, s: Selection): boolean {
   if (s.exclude.includes(e.id)) return false;
   if (s.include.includes(e.id)) return true;
   if (s.manualOnly) return false;
-  if (s.models.length && !s.models.includes(e.modelId)) return false;
+  if (s.modelsMode === "selected" && !s.models.includes(e.modelId))
+    return false;
+  if (
+    s.modelsMode === undefined &&
+    s.models.length &&
+    !s.models.includes(e.modelId)
+  )
+    return false;
   const pass = (c: Condition) => {
     const raw = e.properties[c.field];
     const v = (raw ?? "").toLocaleLowerCase();
@@ -158,9 +177,27 @@ export function matches(e: ElementInfo, s: Selection): boolean {
 export const configKey = (c: Check) =>
   JSON.stringify([
     c.type,
-    c.a,
-    c.b,
+    ...[c.a, c.b].map(
+      ({
+        models,
+        modelsMode,
+        conditions,
+        mode,
+        include,
+        exclude,
+        manualOnly,
+      }) => ({
+        models,
+        modelsMode,
+        conditions,
+        mode,
+        include,
+        exclude,
+        manualOnly,
+      }),
+    ),
     c.precision,
+    c.minPenetration,
     c.touching,
     c.ignoreSameModel,
     c.ignoreSameGroup,
@@ -207,6 +244,37 @@ export function readProject(text: string): Project {
   )
     throw Error("Это не файл проекта проверок НашеПО.");
   const seen = new Set<string>();
+  p.sets ??= [];
+  if (
+    !Array.isArray(p.sets) ||
+    !p.sets.every(
+      (set) =>
+        set &&
+        typeof set.id === "string" &&
+        typeof set.name === "string" &&
+        set.selection &&
+        Array.isArray(set.selection.models) &&
+        set.selection.models.every((id) => typeof id === "string") &&
+        (set.selection.modelsMode === undefined ||
+          ["all", "selected"].includes(set.selection.modelsMode)) &&
+        Array.isArray(set.selection.conditions) &&
+        set.selection.conditions.every(
+          (condition) =>
+            condition &&
+            typeof condition.field === "string" &&
+            typeof condition.value === "string" &&
+            ["eq", "ne", "contains", "exists", "gt", "lt"].includes(
+              condition.op,
+            ),
+        ) &&
+        ["all", "any"].includes(set.selection.mode),
+    )
+  )
+    throw Error("Некорректные наборы параметров.");
+  for (const set of p.sets)
+    set.selection.modelsMode ??= set.selection.models.length
+      ? "selected"
+      : "all";
   for (const c of p.checks) {
     if (
       !c ||
@@ -214,13 +282,19 @@ export function readProject(text: string): Project {
       seen.has(c.id) ||
       typeof c.name !== "string" ||
       !["intersection", "duplicates"].includes(c.type) ||
+      !["new", "done", "stale"].includes(c.status) ||
       !Number.isFinite(c.precision) ||
       c.precision < 0.001 ||
       c.precision > 100 ||
+      (c.minPenetration !== undefined &&
+        (!Number.isFinite(c.minPenetration) ||
+          c.minPenetration < 0 ||
+          c.minPenetration > 100000)) ||
       !Array.isArray(c.results)
     )
       throw Error("Некорректные параметры проверки.");
     seen.add(c.id);
+    c.minPenetration ??= 0;
     if (
       ![
         "touching",
@@ -232,15 +306,22 @@ export function readProject(text: string): Project {
           typeof (c as unknown as Record<string, unknown>)[k] === "boolean",
       ) ||
       typeof c.equalProperty !== "string" ||
+      (c.warnings !== undefined &&
+        (!Array.isArray(c.warnings) ||
+          !c.warnings.every((warning) => typeof warning === "string"))) ||
       (c.modelsAtRun !== undefined &&
         (!Array.isArray(c.modelsAtRun) ||
           !c.modelsAtRun.every((id) => typeof id === "string")))
     )
       throw Error("Некорректные правила проверки.");
-    for (const s of [c.a, c.b])
+    c.warnings ??= [];
+    for (const s of [c.a, c.b]) {
       if (
         !s ||
         (s.manualOnly !== undefined && typeof s.manualOnly !== "boolean") ||
+        (s.modelsMode !== undefined &&
+          !["all", "selected"].includes(s.modelsMode)) ||
+        (s.presetId !== undefined && typeof s.presetId !== "string") ||
         !["all", "any"].includes(s.mode) ||
         ![s.models, s.include, s.exclude].every(
           (a) => Array.isArray(a) && a.every((v) => typeof v === "string"),
@@ -255,6 +336,8 @@ export function readProject(text: string): Project {
         )
       )
         throw Error("Некорректная выборка.");
+      s.modelsMode ??= s.models.length ? "selected" : "all";
+    }
     for (const r of c.results) {
       if (r?.image !== undefined && !isSnapshot(r.image))
         throw Error("Некорректный снимок результата.");
@@ -262,6 +345,8 @@ export function readProject(text: string): Project {
         !r ||
         typeof r.id !== "string" ||
         !Object.hasOwn(stateNames, r.state) ||
+        (r.penetrationMm !== undefined &&
+          (!Number.isFinite(r.penetrationMm) || r.penetrationMm < 0)) ||
         !Array.isArray(r.point) ||
         r.point.length !== 3 ||
         !r.point.every(Number.isFinite)
@@ -279,8 +364,6 @@ export function readProject(text: string): Project {
         )
           throw Error("Некорректный элемент результата.");
     }
-    c.status = "stale";
-    c.warnings = [];
   }
   return p;
 }

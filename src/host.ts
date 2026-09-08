@@ -6,9 +6,12 @@ export interface Snapshot {
   elements: GeometryElement[];
   fingerprint: string;
   warnings: string[];
+  blockers: string[];
   models: { id: string; name: string }[];
+  indexedModelIds: string[];
 }
 const markerLayer = "nashepo.checks.points";
+const overlayId = "nashepo.checks.highlight";
 function checkpoint(aborted: () => boolean) {
   let tick = performance.now();
   return async () => {
@@ -43,9 +46,44 @@ function flatten(
     if (!key.startsWith("$"))
       flatten(v, prefix ? `${prefix}.${key}` : key, out, depth + 1);
 }
+function usableGeometryIndices(g: DwgGeometry3d): GeometryIndices {
+  const vertexCount = g.vertices.length / 3,
+    finiteVertex = (index: number) =>
+      Number.isFinite(g.vertices[index * 3]) &&
+      Number.isFinite(g.vertices[index * 3 + 1]) &&
+      Number.isFinite(g.vertices[index * 3 + 2]),
+    valid = (k: number) => {
+      const a = g.indices[k],
+        b = g.indices[k + 1],
+        c = g.indices[k + 2];
+      return (
+        a < vertexCount &&
+        b < vertexCount &&
+        c < vertexCount &&
+        a !== b &&
+        b !== c &&
+        c !== a &&
+        finiteVertex(a) &&
+        finiteVertex(b) &&
+        finiteVertex(c)
+      );
+    };
+  let count = 0;
+  for (let k = 0; k < g.indices.length; k += 3) if (valid(k)) count += 3;
+  if (count === g.indices.length) return g.indices;
+  const result = new Uint32Array(count);
+  for (let k = 0, offset = 0; k < g.indices.length; k += 3)
+    if (valid(k)) {
+      result[offset++] = g.indices[k];
+      result[offset++] = g.indices[k + 1];
+      result[offset++] = g.indices[k + 2];
+    }
+  return result;
+}
 export class ModelHost {
   private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
+  private overlay?: { view: CadViewContext; layer: CadViewLayer };
   private pointView?: CadViewContext;
   private scannedApp?: Application;
   private scannedView?: CadViewContext;
@@ -65,9 +103,13 @@ export class ModelHost {
       this.isCurrent() && this.refs.has(clash.a.id) && this.refs.has(clash.b.id)
     );
   }
+  projectToken() {
+    return this.app as object | undefined;
+  }
   async scan(
     status: (s: string) => void,
     aborted: () => boolean,
+    selectedModels?: Set<string>,
   ): Promise<Snapshot> {
     const app = this.app,
       view = this.view,
@@ -78,6 +120,7 @@ export class ModelHost {
       );
     const models: Snapshot["models"] = [],
       warnings: string[] = [],
+      blockers: string[] = [],
       elements: GeometryElement[] = [],
       refs = new Map<string, DwgModel3d[]>();
     const visited = new Set<Drawing>();
@@ -96,13 +139,15 @@ export class ModelHost {
       const modelName = d.layers.layer0?.modelName || source;
       const modelId = source;
       models.push({ id: modelId, name: modelName });
+      const includeModel = !selectedModels || selectedModels.has(modelId);
       const entities: DwgModel3d[] = [];
-      d.layouts.model?.walk((e) => {
-        if (e.type === DwgType.model3d) entities.push(e as DwgModel3d);
-        else if (e.type === DwgType.insert)
-          warnings.push(`${modelName}: вставка блока не включена в расчёт.`);
-        return false;
-      });
+      if (includeModel)
+        d.layouts.model?.walk((e) => {
+          if (e.type === DwgType.model3d) entities.push(e as DwgModel3d);
+          else if (e.type === DwgType.insert)
+            warnings.push(`${modelName}: вставка блока не включена в расчёт.`);
+          return false;
+        });
       const groups = new Map<string, DwgModel3d[]>();
       for (const obj of entities) {
         const key = JSON.stringify([
@@ -111,6 +156,7 @@ export class ModelHost {
         ]);
         groups.set(key, [obj]);
       }
+      let skippedGeometry = 0;
       for (const [key, objects] of groups) {
         if (aborted()) throw Error("Чтение моделей отменено.");
         if (app !== this.app || view !== this.view)
@@ -165,7 +211,6 @@ export class ModelHost {
               continue;
             }
             closed &&= mesh.isClosed;
-            triangleCount += g.indices.length / 3;
             for (let k = 0; k < g.vertices.length; k += 3) {
               const p: Vec = [
                 g.vertices[k],
@@ -197,8 +242,31 @@ export class ModelHost {
                 if (aborted()) throw Error("Чтение моделей отменено.");
               }
             }
-            for (let k = 0; k < g.indices.length; k++) {
-              hash = Math.imul(hash ^ g.indices[k], 16777619);
+            const vertexCount = g.vertices.length / 3;
+            const finiteVertex = (index: number) =>
+              Number.isFinite(g.vertices[index * 3]) &&
+              Number.isFinite(g.vertices[index * 3 + 1]) &&
+              Number.isFinite(g.vertices[index * 3 + 2]);
+            for (let k = 0; k < g.indices.length; k += 3) {
+              const a = g.indices[k],
+                b = g.indices[k + 1],
+                c = g.indices[k + 2];
+              hash = Math.imul(hash ^ a, 16777619);
+              hash = Math.imul(hash ^ b, 16777619);
+              hash = Math.imul(hash ^ c, 16777619);
+              if (
+                a < vertexCount &&
+                b < vertexCount &&
+                c < vertexCount &&
+                a !== b &&
+                b !== c &&
+                c !== a &&
+                finiteVertex(a) &&
+                finiteVertex(b) &&
+                finiteVertex(c)
+              )
+                triangleCount++;
+              else invalid = true;
               if (k % 150000 === 0) {
                 await yieldWork();
                 if (aborted()) throw Error("Чтение моделей отменено.");
@@ -207,9 +275,7 @@ export class ModelHost {
           }
         }
         if (invalid || !triangleCount) {
-          warnings.push(
-            modelName + " / " + name + ": геометрия отсутствует или неполна.",
-          );
+          if (!triangleCount) skippedGeometry++;
           if (!triangleCount) continue;
           closed = false;
         }
@@ -231,25 +297,30 @@ export class ModelHost {
         elements.push(e);
         refs.set(id, objects);
       }
+      if (skippedGeometry)
+        warnings.push(
+          `${modelName}: пропущено элементов без треугольной геометрии — ${skippedGeometry}.`,
+        );
       const attachments: DwgAttachment[] = [];
       d.attachments.forEach((a) => {
         attachments.push(a);
       });
       for (const attachment of attachments) {
+        const attachmentSource = `${source}/${attachment.name || attachment.uri || attachment.$id}`;
         if (attachment.model)
           await visit(
             attachment.model,
-            `${source}/${attachment.name || attachment.uri || attachment.$id}`,
+            attachmentSource,
             hidden || attachment.hidden,
           );
-        else
-          warnings.push(
+        else if (!selectedModels || selectedModels.has(attachmentSource))
+          blockers.push(
             `${attachment.name || attachment.uri || "Подключённая модель"}: модель не загружена. Откройте её перед расчётом.`,
           );
       }
     };
     await visit(drawing, drawing.layers.layer0?.modelName || "Проект", false);
-    if (!elements.length)
+    if (!elements.length && (!selectedModels || selectedModels.size > 0))
       throw Error(
         "В открытом проекте не найдены 3D-элементы с доступной геометрией.",
       );
@@ -262,7 +333,11 @@ export class ModelHost {
       elements,
       fingerprint: `${elements.length}:${hash >>> 0}`,
       warnings: [...new Set(warnings)],
+      blockers: [...new Set(blockers)],
       models,
+      indexedModelIds: models
+        .filter((model) => !selectedModels || selectedModels.has(model.id))
+        .map((model) => model.id),
     };
   }
   async geometry(id: string, aborted: () => boolean): Promise<GeometryElement> {
@@ -272,23 +347,25 @@ export class ModelHost {
       objects = this.refs.get(id);
     if (!meta || !objects) throw Error("Элемент отсутствует.");
     const chunks = objects.flatMap((object) =>
-      Object.values(object.meshes).map((mesh) => ({
-        object,
-        g: mesh.geometry,
-      })),
+      Object.values(object.meshes).flatMap((mesh) => {
+        const g = mesh.geometry;
+        if (!g || g.indices.length % 3) return [];
+        const indices = usableGeometryIndices(g);
+        return indices.length ? [{ object, g, indices }] : [];
+      }),
     );
     let vertexLength = 0,
       indexLength = 0;
-    for (const { g } of chunks) {
+    for (const { g, indices: chunkIndices } of chunks) {
       if (!g) throw Error("Геометрия недоступна.");
       vertexLength += g.vertices.length;
-      indexLength += g.indices.length;
+      indexLength += chunkIndices.length;
     }
     const vertices = new Float64Array(vertexLength),
       indices = new Uint32Array(indexLength);
     let vo = 0,
       io = 0;
-    for (const { object, g } of chunks) {
+    for (const { object, g, indices: chunkIndices } of chunks) {
       if (!g) throw Error("Геометрия недоступна.");
       for (let k = 0; k < g.vertices.length; k += 3) {
         const p: Vec = [g.vertices[k], g.vertices[k + 1], g.vertices[k + 2]];
@@ -300,17 +377,15 @@ export class ModelHost {
             throw Error("Чтение геометрии отменено.");
         }
       }
-      for (let k = 0; k < g.indices.length; k++) {
-        if (g.indices[k] >= g.vertices.length / 3)
-          throw Error("Некорректный индекс геометрии.");
-        indices[io + k] = vo / 3 + g.indices[k];
+      for (let k = 0; k < chunkIndices.length; k++) {
+        indices[io + k] = vo / 3 + chunkIndices[k];
         if (k % 150000 === 0) {
           await yieldWork();
           if (aborted()) throw Error("Чтение геометрии отменено.");
         }
       }
       vo += g.vertices.length;
-      io += g.indices.length;
+      io += chunkIndices.length;
     }
     return { ...meta, vertices, indices };
   }
@@ -331,6 +406,11 @@ export class ModelHost {
     this.view!.invalidate();
   }
   clear() {
+    if (this.overlay) {
+      this.overlay.view.layer.removeLayer(this.overlay.layer);
+      this.overlay.view.invalidate();
+      this.overlay = undefined;
+    }
     if (this.pointView) {
       const l = this.pointView.annotations.get(markerLayer);
       if (l) this.pointView.annotations.release(l);
@@ -361,20 +441,93 @@ export class ModelHost {
       p,
     );
   }
-  /**
-   * Выделить оба элемента коллизии штатным выделением программы.
-   *
-   * Раньше вместо этого поверх модели рисовалась перекрашенная копия обоих
-   * элементов. При камере с масштабом сдвиг, который убирал мерцание граней,
-   * получался не миллиметровым, а заметным, и красная копия оказывалась в
-   * стороне от самой коллизии. Штатное выделение такой копии не создаёт.
-   */
   private highlight(ids: string[]) {
-    const view = this.view;
-    if (!view) return;
-    const objects = new Set(ids.flatMap((id) => this.refs.get(id) || []));
+    if (this.overlay) {
+      this.overlay.view.layer.removeLayer(this.overlay.layer);
+      this.overlay = undefined;
+    }
+    const view = this.view!,
+      objects = ids.flatMap((id, side) =>
+        (this.refs.get(id) || []).map((obj) => ({ obj, side })),
+      );
+    const surfaces = objects.flatMap(({ obj, side }) =>
+      Object.values(obj.meshes).flatMap((mesh) => {
+        const g = mesh.geometry;
+        if (!g || g.indices.length % 3) return [];
+        const source = usableGeometryIndices(g);
+        if (!source.length) return [];
+        const color = side === 0 ? 0xff3636ff : 0xffff9d2b;
+        const indices = new Uint32Array(source.length * 2);
+        indices.set(source);
+        for (let i = 0; i < source.length; i += 3) {
+          indices[source.length + i] = source[i];
+          indices[source.length + i + 1] = source[i + 2];
+          indices[source.length + i + 2] = source[i + 1];
+        }
+        const geometry: UuidGeometry3d = {
+          uuid: "nashepo.checks." + side + "." + g.uuid,
+          vertices: g.vertices,
+          normals: g.normals,
+          bounds: g.bounds,
+          indices,
+          colors: new Uint32Array(g.vertices.length / 3).fill(color),
+        };
+        return [{ obj, geometry, color }];
+      }),
+    );
+    const paint = (dc: DeviceContext, camera: Camera) => {
+      const old = dc.color,
+        material = dc.rasterizer.material,
+        inverse = Math3d.mat4.inverse(Math3d.mat4.alloc(), camera.view);
+      dc.rasterizer.material = undefined;
+      try {
+        for (const { obj, geometry, color } of surfaces) {
+          dc.color = color;
+          dc.pushMatrix();
+          try {
+            const matrix = Math3d.mat4.alloc();
+            for (let i = 0; i < 16; i++) matrix[i] = obj.matrix[i];
+            // A submillimetre view-facing offset prevents depth flicker.
+            const offset = 0.0002;
+            matrix[12] += inverse[8] * offset;
+            matrix[13] += inverse[9] * offset;
+            matrix[14] += inverse[10] * offset;
+            dc.multMatrix(matrix);
+            dc.mesh(geometry);
+          } finally {
+            dc.popMatrix();
+          }
+        }
+      } finally {
+        dc.color = old;
+        dc.rasterizer.material = material;
+      }
+    };
+    const layer: CadViewLayer = {
+      id: overlayId,
+      order: 10000,
+      visible: true,
+      paint: () => {},
+      paint3d: paint,
+      paintObject: () => {},
+      paintSelected: () => {},
+      release: () => {},
+      bounds: () => undefined,
+      *objectsAt() {},
+      *selectableObjects() {},
+      *selectedObjects() {},
+      selectObject: () => {},
+      selectObjects: () => {},
+      isSelectedObject: () => false,
+      clearSelected: () => {},
+      owned: () => false,
+      regenCadView: () => {},
+      hasSelected: () => false,
+      *osnap() {},
+    };
     view.layer.clearSelected();
-    view.layer.selectObjects((o) => objects.has(o), true);
+    view.layer.addLayer(layer);
+    this.overlay = { view, layer };
     view.invalidate();
   }
   async snapshot(
