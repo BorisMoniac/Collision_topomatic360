@@ -349,15 +349,9 @@ async function penetrationEstimate(
       if (sampled++ % 32 === 0) await checkpoint();
     }
   }
-  if (depth <= eps) {
-    const overlaps = x.bounds.min.map(
-      (v, k) =>
-        Math.min(x.bounds.max[k], y.bounds.max[k]) -
-        Math.max(v, y.bounds.min[k]),
-    );
-    depth = Math.max(0, Math.min(...overlaps));
-  }
-  return depth * 1000;
+  // AABB overlap is not a penetration depth. For pipes and fittings it often
+  // equals a diameter even when only faceted boundary surfaces meet.
+  return depth > eps ? depth * 1000 : 0;
 }
 export interface RunProgress {
   phase: string;
@@ -472,7 +466,18 @@ export async function calculate(
         found: found.length,
       });
     }
-    for (const bi of query(elementTree, xm.bounds, eps)) {
+    const candidates = [...query(elementTree, xm.bounds, eps)];
+    for (let ci = 0; ci < candidates.length; ci++) {
+      const bi = candidates[ci];
+      if (performance.now() - lastProgress > 150) {
+        lastProgress = performance.now();
+        progress({
+          phase: `Проверка пар · A ${ai + 1}/${a.length} · кандидаты ${ci + 1}/${candidates.length}`,
+          done: ai,
+          total: a.length,
+          found: found.length,
+        });
+      }
       const ym = b[bi];
       await checkpoint();
       if (xm.id === ym.id || !overlap(xm.bounds, ym.bounds, eps)) continue;

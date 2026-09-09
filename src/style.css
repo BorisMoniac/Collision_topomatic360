@@ -783,6 +783,33 @@ input[type="checkbox"] {
   padding: 3px 9px;
   font-size: 10px;
 }
+.run-progress {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-bottom: 1px solid #425165;
+  background: #202a20;
+  color: #d9e7d2;
+  font-size: 10px;
+}
+.run-progress progress {
+  width: 100%;
+  height: 7px;
+  accent-color: #e3bc43;
+}
+#run-phase,
+#run-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#run-value {
+  text-align: right;
+  color: #b9c9b3;
+}
 .workspace {
   grid-template-columns: 190px minmax(0, 1fr);
 }

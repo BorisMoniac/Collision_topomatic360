@@ -89,6 +89,12 @@ export class ModelHost {
   private pointView?: CadViewContext;
   private scannedApp?: Application;
   private scannedView?: CadViewContext;
+  private captureDepth = 0;
+  private captureLayout?: {
+    panel: PanelBar;
+    size: number;
+    maximized: boolean;
+  };
   constructor(private ctx: Context) {}
   get view() {
     return (this.ctx.manager.activeWindow as CadViewDocumentWindow | undefined)
@@ -107,6 +113,41 @@ export class ModelHost {
   }
   projectToken() {
     return this.app as object | undefined;
+  }
+  projectId() {
+    return this.app?.id;
+  }
+  async captureWorkspace<T>(task: () => Promise<T>): Promise<T> {
+    const outer = this.captureDepth++ === 0;
+    if (outer) {
+      const panel = this.ctx.manager.panelBar;
+      if (panel?.visible) {
+        this.captureLayout = {
+          panel,
+          size: panel.size,
+          maximized: panel.maximized,
+        };
+        panel.maximized = false;
+        panel.size = Math.min(panel.size, 120);
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+      }
+    }
+    try {
+      return await task();
+    } finally {
+      this.captureDepth--;
+      if (outer && this.captureLayout) {
+        const { panel, size, maximized } = this.captureLayout;
+        this.captureLayout = undefined;
+        panel.size = size;
+        panel.maximized = maximized;
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+      }
+    }
   }
   async scan(
     status: (s: string) => void,
@@ -529,6 +570,16 @@ export class ModelHost {
     view.invalidate();
   }
   async snapshot(
+    clash: Clash,
+    distance: number,
+    aborted: () => boolean,
+    current = false,
+  ): Promise<string> {
+    return this.captureWorkspace(() =>
+      this.snapshotInWorkspace(clash, distance, aborted, current),
+    );
+  }
+  private async snapshotInWorkspace(
     clash: Clash,
     distance: number,
     aborted: () => boolean,

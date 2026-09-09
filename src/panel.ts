@@ -22,12 +22,34 @@ import { download, escape as e, reportHtml, viewerSession } from "./export";
 import { brandLogo } from "./brand";
 import css from "./style.css?inline";
 const projects = new WeakMap<object, Project>();
+const sessionPrefix = "nashepo.collisionfinder360.project.";
 const emptyProject = (): Project => ({
   format: "nashepo.checks",
   version: 1,
   checks: [],
   sets: [],
 });
+const restoreSession = (id?: string): Project | undefined => {
+  if (!id || typeof sessionStorage === "undefined") return;
+  try {
+    const value = sessionStorage.getItem(sessionPrefix + id);
+    return value ? readProject(value) : undefined;
+  } catch {
+    return;
+  }
+};
+const storeSession = (id: string | undefined, project: Project) => {
+  if (!id || typeof sessionStorage === "undefined") return;
+  try {
+    // Images are reproducible and can exceed the browser storage quota.
+    sessionStorage.setItem(
+      sessionPrefix + id,
+      JSON.stringify(project, (key, value) => (key === "image" ? undefined : value)),
+    );
+  } catch {
+    // The in-memory copy still preserves the complete project for this page.
+  }
+};
 export function mountPanel(
   container: HTMLElement,
   host: ModelHost,
@@ -35,8 +57,9 @@ export function mountPanel(
   const root = container.shadowRoot || container.attachShadow({ mode: "open" });
   const disposeResize = guardPanelResize(container);
   let projectToken = host.projectToken(),
+    projectId = host.projectId(),
     saved = projectToken
-      ? projects.get(projectToken) || emptyProject()
+      ? projects.get(projectToken) || restoreSession(projectId) || emptyProject()
       : emptyProject();
   if (projectToken) projects.set(projectToken, saved);
   let snapshot: Snapshot | undefined,
@@ -63,7 +86,7 @@ export function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div id="run-progress" class="run-progress" hidden><span id="run-phase">Подготовка</span><progress id="run-bar"></progress><span id="run-value"></span></div><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
   const clearButton = document.createElement("button");
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
@@ -74,6 +97,30 @@ export function mountPanel(
   const note = (text: string, error = false) => {
     q("notice").textContent = text;
     q("notice").classList.toggle("error", error);
+  };
+  const showProgress = (
+    label: string,
+    done?: number,
+    total?: number,
+    found?: number,
+  ) => {
+    const box = q("run-progress"),
+      bar = q<HTMLProgressElement>("run-bar");
+    box.hidden = false;
+    q("run-phase").textContent = label;
+    if (total && total > 0 && done !== undefined) {
+      bar.max = total;
+      bar.value = Math.min(done, total);
+      q("run-value").textContent =
+        `${Math.round((done / total) * 100)}% · ${done}/${total}` +
+        (found === undefined ? "" : ` · найдено ${found}`);
+    } else {
+      bar.removeAttribute("value");
+      q("run-value").textContent = found === undefined ? "" : `Найдено ${found}`;
+    }
+  };
+  const hideProgress = () => {
+    q("run-progress").hidden = true;
   };
   const action = async (fn: () => unknown | Promise<unknown>) => {
     try {
@@ -111,15 +158,22 @@ export function mountPanel(
   const mark = () => {
     dirty = true;
     q("dirty").textContent = "Есть несохранённые изменения";
+    if (projectToken) projects.set(projectToken, saved);
+    storeSession(projectId, saved);
   };
   const switchProject = () => {
     const nextToken = host.projectToken();
     if (!nextToken || nextToken === projectToken) return false;
     if (!projectToken && (saved.checks.length || saved.sets.length))
       projects.set(nextToken, saved);
-    else saved = projects.get(nextToken) || emptyProject();
+    else
+      saved =
+        projects.get(nextToken) ||
+        restoreSession(host.projectId()) ||
+        emptyProject();
     projects.set(nextToken, saved);
     projectToken = nextToken;
+    projectId = host.projectId();
     snapshot = undefined;
     current = saved.checks[0]?.id || "";
     selected = "";
@@ -218,7 +272,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшей оценкой глубины не попадут в результат">Минимальная глубина, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Глубина — максимальное удаление точки поверхности, оказавшейся внутри второго замкнутого тела, до его ближайшей поверхности. Это не длина захода элемента вдоль оси.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -228,7 +282,7 @@ export function mountPanel(
           stateNames,
         )
           .map(([k, v]) => `<option value="${k}">${v}</option>`)
-          .join("")}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Вхождение от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки" : "○ Знаки"}</button><span id="result-count"></span></div><div class="bulk-tools"><select id="bulk-state" title="Состояние для выбранных строк">${Object.entries(
+          .join("")}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Глубина от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки" : "○ Знаки"}</button><span id="result-count"></span></div><div class="bulk-tools"><select id="bulk-state" title="Состояние для выбранных строк">${Object.entries(
             stateNames,
           )
             .map(([k, v]) => `<option value="${k}">${v}</option>`)
@@ -248,7 +302,7 @@ export function mountPanel(
     page = Math.max(0, Math.min(page, pages - 1));
     const visible = rows.slice(page * 50, page * 50 + 50);
     q("table").innerHTML = rows.length
-      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Вхождение, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], c.type === "duplicates" ? "—" : (r.penetrationMm ?? 0).toFixed(1), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Глубина, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], c.type === "duplicates" ? "—" : (r.penetrationMm ?? 0).toFixed(1), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : '<div class="empty">Нет результатов. Запустите проверку или измените фильтры.</div>';
     q("page").textContent =
       `${page + 1} / ${pages}`;
@@ -263,7 +317,7 @@ export function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span>${c?.type === "duplicates" ? "Совпадение геометрии" : `Вхождение ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок пары ещё не создан</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="Оценка максимальной глубины поверхности внутри второго тела; не длина захода вдоль оси">${c?.type === "duplicates" ? "Совпадение геометрии" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок пары ещё не создан</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -366,9 +420,21 @@ export function mountPanel(
     if (busy) return;
     selected = id;
     if (tab === "results") {
+      const index = resultRows().findIndex((row) => row.id === id),
+        targetPage = index < 0 ? page : Math.floor(index / 50);
+      if (targetPage !== page) {
+        page = targetPage;
+        renderTable();
+      }
       for (const row of root.querySelectorAll<HTMLElement>("[data-result]"))
         row.classList.toggle("active", row.dataset.result === id);
       renderDetail();
+      requestAnimationFrame(() => {
+        const row = [...root.querySelectorAll<HTMLElement>("[data-result]")].find(
+          (item) => item.dataset.result === id,
+        );
+        row?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      });
     }
     markers();
     if (focus) {
@@ -383,6 +449,7 @@ export function mountPanel(
   async function previewPair(r: Clash) {
     aborted = false;
     setBusy(true);
+    showProgress("Создание снимка пары");
     try {
       r.image = await host.snapshot(
         r,
@@ -399,13 +466,22 @@ export function mountPanel(
         true,
       );
     } finally {
+      hideProgress();
       setBusy(false);
     }
   }
   async function scan(targets?: Check[], catalogOnly = false) {
     switchProject();
     const scope = catalogOnly ? new Set<string>() : scanScope(targets);
-    snapshot = await host.scan(note, () => aborted, scope);
+    showProgress("Подготовка моделей");
+    snapshot = await host.scan(
+      (message) => {
+        note(message);
+        showProgress(message);
+      },
+      () => aborted,
+      scope,
+    );
     q("model-count").textContent =
       `Проиндексировано моделей: ${snapshot.indexedModelIds.length} из ${snapshot.models.length} · элементов: ${snapshot.elements.length}`;
     render();
@@ -438,8 +514,11 @@ export function mountPanel(
     q("checks").inert = value;
   };
   async function compute(c: Check): Promise<Clash[]> {
-    const report = (p: RunProgress) =>
-      note(`${c.name} · ${p.phase} ${p.done}/${p.total} · найдено ${p.found}`);
+    const report = (p: RunProgress) => {
+      const label = `${c.name} · ${p.phase}`;
+      note(`${label} ${p.done}/${p.total} · найдено ${p.found}`);
+      showProgress(label, p.done, p.total, p.found);
+    };
     let instance: Worker;
     try {
       instance = new EngineWorker();
@@ -525,6 +604,7 @@ export function mountPanel(
       }
     aborted = false;
     setBusy(true);
+    showProgress("Подготовка моделей");
     try {
       await scan(targets);
       setBusy(true);
@@ -591,6 +671,7 @@ export function mountPanel(
       const first = check()?.results.find((r) => r.id === selected);
       if (first && !aborted) await previewPair(first);
     } finally {
+      hideProgress();
       setBusy(false);
       render();
     }
@@ -652,10 +733,12 @@ export function mountPanel(
       syncVisibleModelSelections();
       aborted = false;
       setBusy(true);
+      showProgress("Чтение моделей");
       try {
         const target = check();
         await scan(target ? [target] : undefined, !target);
       } finally {
+        hideProgress();
         setBusy(false);
         render();
       }
@@ -764,6 +847,7 @@ export function mountPanel(
         return;
       saved = incoming;
       if (projectToken) projects.set(projectToken, saved);
+      storeSession(projectId, saved);
       current = saved.checks[0]?.id || "";
       selected = "";
       checked.clear();
@@ -812,7 +896,7 @@ export function mountPanel(
           if (!Number.isFinite(n) || n < 0 || n > 100000) {
             t.value = String(c.minPenetration);
             throw Error(
-              "Минимальное вхождение должно быть от 0 до 100 000 мм.",
+              "Минимальная глубина должна быть от 0 до 100 000 мм.",
             );
           }
           c.minPenetration = n;
@@ -1016,6 +1100,7 @@ export function mountPanel(
         if (r) {
           aborted = false;
           setBusy(true);
+          showProgress("Создание снимка пары");
           try {
             r.image = await host.snapshot(
               r,
@@ -1028,6 +1113,7 @@ export function mountPanel(
             renderDetail();
             note("Снимок сохранён в результат.");
           } finally {
+            hideProgress();
             setBusy(false);
           }
         }
@@ -1057,8 +1143,6 @@ export function mountPanel(
             rows.findIndex((r) => r.id === selected) +
             (b.id === "next" ? 1 : -1);
         if (rows[i]) {
-          page = Math.floor(i / 50);
-          renderTable();
           pick(rows[i].id, true);
         }
       }
@@ -1073,30 +1157,43 @@ export function mountPanel(
             previous = view?.storeView();
           aborted = false;
           setBusy(true);
+          showProgress("Подготовка снимков отчёта", 0, rows.length);
           try {
-            let i = 0;
-            for (const row of rows) {
-              if (aborted)
-                throw Error(
-                  "Подготовка отчёта отменена. Уже полученные снимки сохранены.",
-                );
-              note("Подготовка снимков: " + ++i + " / " + rows.length);
-              if (!row.image || row.imageScope !== "pair-ab") {
-                if (row.state === "resolved" && !host.canLocate(row)) continue;
-                try {
-                  row.image = await host.snapshot(
-                    row,
-                    Number(q<HTMLInputElement>("distance").value),
-                    () => aborted,
+            await host.captureWorkspace(async () => {
+              let i = 0;
+              for (const row of rows) {
+                if (aborted)
+                  throw Error(
+                    "Подготовка отчёта отменена. Уже полученные снимки сохранены.",
                   );
-                  row.imageScope = "pair-ab";
-                  mark();
-                } catch (error) {
-                  if (aborted || !host.isCurrent()) throw error;
-                  failedImages++;
+                showProgress(
+                  "Подготовка снимков отчёта",
+                  i,
+                  rows.length,
+                );
+                note("Подготовка снимков: " + (i + 1) + " / " + rows.length);
+                if (!row.image || row.imageScope !== "pair-ab") {
+                  if (row.state === "resolved" && !host.canLocate(row)) {
+                    i++;
+                    continue;
+                  }
+                  try {
+                    row.image = await host.snapshot(
+                      row,
+                      Number(q<HTMLInputElement>("distance").value),
+                      () => aborted,
+                    );
+                    row.imageScope = "pair-ab";
+                    mark();
+                  } catch (error) {
+                    if (aborted || !host.isCurrent()) throw error;
+                    failedImages++;
+                  }
                 }
+                i++;
+                showProgress("Подготовка снимков отчёта", i, rows.length);
               }
-            }
+            });
           } finally {
             if (view && host.isCurrent()) {
               const r = c.results.find((r) => r.id === selected);
@@ -1110,6 +1207,7 @@ export function mountPanel(
                 } catch {}
               if (previous) view.restoreView(previous);
             }
+            hideProgress();
             setBusy(false);
           }
         }
