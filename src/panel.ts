@@ -395,6 +395,76 @@ export function mountPanel(
       }
     return ids;
   };
+  const modelAliases = (value: string) => {
+    let normalized = value.trim().replace(/\\/g, "/").toLocaleLowerCase();
+    try {
+      normalized = decodeURIComponent(normalized);
+    } catch {}
+    normalized = normalized.replace(/[?#].*$/, "");
+    const tail = normalized.split("/").filter(Boolean).at(-1) || normalized;
+    return new Set([normalized, tail]);
+  };
+  const reconcileModelSelections = (models: Snapshot["models"]) => {
+    const exact = new Set(models.map((model) => model.id)),
+      candidates = models.map((model) => ({
+        id: model.id,
+        aliases: new Set([
+          ...modelAliases(model.id),
+          ...modelAliases(model.name),
+        ]),
+      }));
+    const resolve = (oldId: string) => {
+      if (exact.has(oldId)) return oldId;
+      const aliases = modelAliases(oldId),
+        matches = candidates.filter((candidate) =>
+          [...aliases].some((alias) => candidate.aliases.has(alias)),
+        );
+      return matches.length === 1 ? matches[0].id : oldId;
+    };
+    const elementId = (id: string) => {
+      try {
+        const parsed = JSON.parse(id);
+        if (!Array.isArray(parsed) || parsed.length < 2) return id;
+        const current = String(parsed[0]),
+          replacement = resolve(current);
+        return replacement === current
+          ? id
+          : JSON.stringify([replacement, ...parsed.slice(1)]);
+      } catch {
+        return id;
+      }
+    };
+    let changed = false;
+    const update = (selection: Selection) => {
+      const models = selection.models.map(resolve),
+        include = selection.include.map(elementId),
+        exclude = selection.exclude.map(elementId);
+      if (
+        models.some((id, index) => id !== selection.models[index]) ||
+        include.some((id, index) => id !== selection.include[index]) ||
+        exclude.some((id, index) => id !== selection.exclude[index])
+      ) {
+        selection.models = [...new Set(models)];
+        selection.include = [...new Set(include)];
+        selection.exclude = [...new Set(exclude)];
+        changed = true;
+      }
+    };
+    for (const c of saved.checks) {
+      update(c.a);
+      update(c.b);
+      if (c.modelsAtRun) c.modelsAtRun = c.modelsAtRun.map(resolve);
+    }
+    for (const set of saved.sets) {
+      const replacement = set.selection.models.map(resolve);
+      if (replacement.some((id, index) => id !== set.selection.models[index])) {
+        set.selection.models = [...new Set(replacement)];
+        changed = true;
+      }
+    }
+    if (changed) mark();
+    return changed;
+  };
   const refreshSelectionCounts = () => {
     const c = check();
     if (!c) return;
@@ -510,8 +580,17 @@ export function mountPanel(
   }
   async function scan(targets?: Check[], catalogOnly = false) {
     switchProject();
-    const scope = catalogOnly ? new Set<string>() : scanScope(targets);
     showProgress("Подготовка моделей");
+    let scope = catalogOnly ? new Set<string>() : scanScope(targets);
+    if (!catalogOnly && scope?.size) {
+      const catalog = await host.scan(
+        (message) => showProgress(message),
+        () => aborted,
+        new Set<string>(),
+      );
+      snapshot = catalog;
+      if (reconcileModelSelections(catalog.models)) scope = scanScope(targets);
+    }
     snapshot = await host.scan(
       (message) => {
         note(message);

@@ -167,6 +167,7 @@ export class ModelHost {
         "Откройте проект Топоматик 360 с IFC или SMDX и сделайте его 3D-окно активным.",
       );
     const models: Snapshot["models"] = [],
+      modelIds = new Set<string>(),
       warnings: string[] = [],
       blockers: string[] = [],
       elements: GeometryElement[] = [],
@@ -188,27 +189,61 @@ export class ModelHost {
       const modelId = source;
       const projectContainer =
         isProjectContainer(modelName) || isProjectContainer(modelId);
-      if (!projectContainer) models.push({ id: modelId, name: modelName });
+      const addModel = (id: string, name: string) => {
+        if (modelIds.has(id)) return;
+        modelIds.add(id);
+        models.push({ id, name });
+      };
+      if (!projectContainer) addModel(modelId, modelName);
       const includeModel =
         !projectContainer && (!selectedModels || selectedModels.has(modelId));
       const entities: DwgModel3d[] = [];
-      if (includeModel)
+      // A WDX project can keep IFC/SMDX geometry in its own drawing instead of
+      // exposing every source as a loaded attachment. Walk that drawing to
+      // discover the actual model names, but never show the WDX container.
+      if (includeModel || projectContainer)
         d.layouts.model?.walk((e) => {
           if (e.type === DwgType.model3d) entities.push(e as DwgModel3d);
           else if (e.type === DwgType.insert)
             warnings.push(`${modelName}: вставка блока не включена в расчёт.`);
           return false;
         });
-      const groups = new Map<string, DwgModel3d[]>();
+      const groups = new Map<
+        string,
+        { key: string; objects: DwgModel3d[]; modelId: string; modelName: string }
+      >();
       for (const obj of entities) {
+        let layer = obj.layer,
+          containedName = "";
+        while (layer) {
+          if (layer.modelName && !isProjectContainer(layer.modelName)) {
+            containedName = layer.modelName;
+            break;
+          }
+          layer = layer.layer;
+        }
+        const objectModelName = projectContainer
+            ? containedName || "Модель проекта"
+            : modelName,
+          objectModelId = projectContainer
+            ? containedName || `${source}/#model`
+            : modelId;
+        if (projectContainer) addModel(objectModelId, objectModelName);
+        if (selectedModels && !selectedModels.has(objectModelId)) continue;
         const key = JSON.stringify([
           obj.layer?.UUID || "",
           obj.$id || obj.$path,
         ]);
-        groups.set(key, [obj]);
+        groups.set(JSON.stringify([objectModelId, key]), {
+          key,
+          objects: [obj],
+          modelId: objectModelId,
+          modelName: objectModelName,
+        });
       }
       let skippedGeometry = 0;
-      for (const [key, objects] of groups) {
+      for (const group of groups.values()) {
+        const { key, objects, modelId, modelName } = group;
         if (aborted()) throw Error("Чтение моделей отменено.");
         if (app !== this.app || view !== this.view)
           throw Error(
@@ -357,7 +392,11 @@ export class ModelHost {
         attachments.push(a);
       });
       for (const attachment of attachments) {
-        const attachmentSource = `${source}/${attachment.name || attachment.uri || attachment.$id}`;
+        const attachmentKey =
+            attachment.name || attachment.uri || attachment.$id,
+          attachmentName = attachmentKey || "Подключённая модель",
+          attachmentSource = `${source}/${attachmentKey || "attachment"}`;
+        if (!attachment.model) addModel(attachmentSource, attachmentName);
         if (attachment.model)
           await visit(
             attachment.model,
@@ -366,15 +405,23 @@ export class ModelHost {
           );
         else if (!selectedModels || selectedModels.has(attachmentSource))
           blockers.push(
-            `${attachment.name || attachment.uri || "Подключённая модель"}: модель не загружена. Откройте её перед расчётом.`,
+            `${attachmentName}: модель не загружена. Откройте её перед расчётом.`,
           );
       }
     };
     await visit(drawing, drawing.layers.layer0?.modelName || "Проект", false);
-    if (!elements.length && (!selectedModels || selectedModels.size > 0))
+    if (!elements.length && (!selectedModels || selectedModels.size > 0)) {
+      const unavailable = selectedModels
+        ? [...selectedModels].filter((id) => !modelIds.has(id))
+        : [];
       throw Error(
-        "В открытом проекте не найдены 3D-элементы с доступной геометрией.",
+        unavailable.length
+          ? `Сохранённая выборка ссылается на модели, которых нет в текущем составе: ${unavailable.join(", ")}. Обновите список моделей.`
+          : models.length
+            ? "В выбранных моделях не найдены 3D-элементы с доступной геометрией. Проверьте, что модели загружены, и выберите нужные файлы."
+            : "В открытом проекте не обнаружены IFC/SMDX-модели. Проверьте состав подключений проекта.",
       );
+    }
     this.clear();
     this.refs = refs;
     this.metadata = new Map(elements.map((e) => [e.id, e]));
