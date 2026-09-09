@@ -367,7 +367,33 @@ export function mountPanel(
     markers();
     if (focus) {
       const r = check()?.results.find((x) => x.id === id);
-      if (r) host.focus(r, Number(q<HTMLInputElement>("distance").value));
+      if (r) {
+        if (r.image && r.imageScope === "pair")
+          host.focus(r, Number(q<HTMLInputElement>("distance").value));
+        else void previewPair(r);
+      }
+    }
+  }
+  async function previewPair(r: Clash) {
+    aborted = false;
+    setBusy(true);
+    try {
+      r.image = await host.snapshot(
+        r,
+        Number(q<HTMLInputElement>("distance").value),
+        () => aborted,
+      );
+      r.imageScope = "pair";
+      mark();
+      if (tab === "results" && selected === r.id) renderDetail();
+    } catch (error) {
+      note(
+        "Результаты сохранены. Снимок пары не создан: " +
+          (error instanceof Error ? error.message : String(error)),
+        true,
+      );
+    } finally {
+      setBusy(false);
     }
   }
   async function scan(targets?: Check[], catalogOnly = false) {
@@ -556,6 +582,8 @@ export function mountPanel(
       note(
         `Проверка завершена. ${check()?.results.length || 0} результатов. Сохраните проверки для продолжения работы.`,
       );
+      const first = check()?.results.find((r) => r.id === selected);
+      if (first && !aborted) await previewPair(first);
     } finally {
       setBusy(false);
       render();
@@ -1029,6 +1057,7 @@ export function mountPanel(
         }
       }
       if (b?.id === "export-html" || b?.id === "export-viewer") {
+        let failedImages = 0;
         const rows = q<HTMLInputElement>("selected-only").checked
           ? c.results.filter((r) => checked.has(r.id))
           : c.results;
@@ -1048,13 +1077,18 @@ export function mountPanel(
               note("Подготовка снимков: " + ++i + " / " + rows.length);
               if (!row.image || row.imageScope !== "pair") {
                 if (row.state === "resolved" && !host.canLocate(row)) continue;
-                row.image = await host.snapshot(
-                  row,
-                  Number(q<HTMLInputElement>("distance").value),
-                  () => aborted,
-                );
-                row.imageScope = "pair";
-                mark();
+                try {
+                  row.image = await host.snapshot(
+                    row,
+                    Number(q<HTMLInputElement>("distance").value),
+                    () => aborted,
+                  );
+                  row.imageScope = "pair";
+                  mark();
+                } catch (error) {
+                  if (aborted || !host.isCurrent()) throw error;
+                  failedImages++;
+                }
               }
             }
           } finally {
@@ -1089,7 +1123,11 @@ export function mountPanel(
             rows.length +
             "; со снимками: " +
             exportRows.filter((r) => r.image).length +
-            ".",
+            "." +
+            (failedImages
+              ? ` Не удалось создать снимков: ${failedImages}; эти строки включены без изображения.`
+              : ""),
+          failedImages > 0,
         );
       }
       const row = t.closest<HTMLElement>("[data-result]");

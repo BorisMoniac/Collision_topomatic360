@@ -85,6 +85,7 @@ export class ModelHost {
   private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
   private overlay?: { view: CadViewContext; layer: CadViewLayer };
+  private overlayError?: Error;
   private pointView?: CadViewContext;
   private scannedApp?: Application;
   private scannedView?: CadViewContext;
@@ -446,6 +447,7 @@ export class ModelHost {
     );
   }
   private highlight(ids: string[]) {
+    this.overlayError = undefined;
     if (this.overlay) {
       this.overlay.view.layer.removeLayer(this.overlay.layer);
       this.overlay = undefined;
@@ -458,8 +460,12 @@ export class ModelHost {
         const source = mesh.geometry;
         if (!source) return [];
         const geometry: UuidGeometry3d = {
-          ...source,
+          // SDK fields may be prototype getters rather than own properties.
           uuid: overlayId + "." + source.uuid,
+          vertices: source.vertices,
+          indices: source.indices,
+          normals: source.normals,
+          bounds: source.bounds,
           colors: new Uint32Array(source.vertices.length / 3).fill(color),
         };
         return [{ obj, geometry }];
@@ -480,6 +486,13 @@ export class ModelHost {
             dc.popMatrix();
           }
         }
+      } catch (error) {
+        // A plugin overlay must never break the host's frame loop.
+        layer.visible = false;
+        this.overlayError = new Error(
+          "Не удалось отрисовать подсветку пары: " +
+            (error instanceof Error ? error.message : String(error)),
+        );
       } finally {
         dc.color = old;
         dc.rasterizer.material = material;
@@ -539,7 +552,12 @@ export class ModelHost {
       drawing.visible = false;
       view.annotations.visible = false;
       view.invalidate();
-      return await captureViewport(view, () => aborted() || !this.isCurrent());
+      const image = await captureViewport(
+        view,
+        () => aborted() || !this.isCurrent(),
+      );
+      if (this.overlayError) throw this.overlayError;
+      return image;
     } finally {
       drawing.visible = drawingVisible;
       view.annotations.visible = annotationsVisible;
