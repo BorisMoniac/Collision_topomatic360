@@ -21,6 +21,7 @@ main {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  user-select: none;
 }
 button,
 input,
@@ -65,6 +66,12 @@ input,
 select,
 textarea {
   background: #111a24;
+}
+input,
+textarea,
+td,
+dd {
+  user-select: text;
 }
 input[type="checkbox"] {
   accent-color: #e6c354;

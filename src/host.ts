@@ -80,6 +80,7 @@ function usableGeometryIndices(g: DwgGeometry3d): GeometryIndices {
     }
   return result;
 }
+const isProjectContainer = (name: string) => /\.wdx(?:[?#].*)?$/i.test(name);
 export class ModelHost {
   private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
@@ -138,8 +139,11 @@ export class ModelHost {
       visited.add(d);
       const modelName = d.layers.layer0?.modelName || source;
       const modelId = source;
-      models.push({ id: modelId, name: modelName });
-      const includeModel = !selectedModels || selectedModels.has(modelId);
+      const projectContainer =
+        isProjectContainer(modelName) || isProjectContainer(modelId);
+      if (!projectContainer) models.push({ id: modelId, name: modelName });
+      const includeModel =
+        !projectContainer && (!selectedModels || selectedModels.has(modelId));
       const entities: DwgModel3d[] = [];
       if (includeModel)
         d.layouts.model?.walk((e) => {
@@ -425,7 +429,7 @@ export class ModelHost {
       throw Error("Дистанция камеры должна быть не менее 0,5 м.");
     if (!this.refs.has(clash.a.id) || !this.refs.has(clash.b.id))
       throw Error("Один из элементов отсутствует в загруженных моделях.");
-    this.view!.layer.clearSelected();
+    this.select([clash.a.id, clash.b.id]);
     this.highlight([clash.a.id, clash.b.id]);
     const p = clash.point,
       v = this.view!;
@@ -447,52 +451,30 @@ export class ModelHost {
       this.overlay = undefined;
     }
     const view = this.view!,
-      objects = ids.flatMap((id, side) =>
-        (this.refs.get(id) || []).map((obj) => ({ obj, side })),
-      );
-    const surfaces = objects.flatMap(({ obj, side }) =>
+      objects = [...new Set(ids.flatMap((id) => this.refs.get(id) || []))];
+    const color = 0xff3636ff;
+    const surfaces = objects.flatMap((obj) =>
       Object.values(obj.meshes).flatMap((mesh) => {
-        const g = mesh.geometry;
-        if (!g || g.indices.length % 3) return [];
-        const source = usableGeometryIndices(g);
-        if (!source.length) return [];
-        const color = side === 0 ? 0xff3636ff : 0xffff9d2b;
-        const indices = new Uint32Array(source.length * 2);
-        indices.set(source);
-        for (let i = 0; i < source.length; i += 3) {
-          indices[source.length + i] = source[i];
-          indices[source.length + i + 1] = source[i + 2];
-          indices[source.length + i + 2] = source[i + 1];
-        }
+        const source = mesh.geometry;
+        if (!source) return [];
         const geometry: UuidGeometry3d = {
-          uuid: "nashepo.checks." + side + "." + g.uuid,
-          vertices: g.vertices,
-          normals: g.normals,
-          bounds: g.bounds,
-          indices,
-          colors: new Uint32Array(g.vertices.length / 3).fill(color),
+          ...source,
+          uuid: overlayId + "." + source.uuid,
+          colors: new Uint32Array(source.vertices.length / 3).fill(color),
         };
-        return [{ obj, geometry, color }];
+        return [{ obj, geometry }];
       }),
     );
-    const paint = (dc: DeviceContext, camera: Camera) => {
+    const paint = (dc: DeviceContext) => {
       const old = dc.color,
-        material = dc.rasterizer.material,
-        inverse = Math3d.mat4.inverse(Math3d.mat4.alloc(), camera.view);
+        material = dc.rasterizer.material;
+      dc.color = color;
       dc.rasterizer.material = undefined;
       try {
-        for (const { obj, geometry, color } of surfaces) {
-          dc.color = color;
+        for (const { obj, geometry } of surfaces) {
           dc.pushMatrix();
           try {
-            const matrix = Math3d.mat4.alloc();
-            for (let i = 0; i < 16; i++) matrix[i] = obj.matrix[i];
-            // A submillimetre view-facing offset prevents depth flicker.
-            const offset = 0.0002;
-            matrix[12] += inverse[8] * offset;
-            matrix[13] += inverse[9] * offset;
-            matrix[14] += inverse[10] * offset;
-            dc.multMatrix(matrix);
+            dc.multMatrix(obj.matrix);
             dc.mesh(geometry);
           } finally {
             dc.popMatrix();
@@ -525,7 +507,6 @@ export class ModelHost {
       hasSelected: () => false,
       *osnap() {},
     };
-    view.layer.clearSelected();
     view.layer.addLayer(layer);
     this.overlay = { view, layer };
     view.invalidate();
@@ -540,12 +521,32 @@ export class ModelHost {
       throw Error("Обновите модели перед созданием снимков.");
     if (!this.canLocate(clash))
       throw Error("Элементы результата отсутствуют в открытых моделях.");
-    if (!current) this.focus(clash, distance, false);
-    else {
-      this.view!.layer.clearSelected();
-      this.highlight([clash.a.id, clash.b.id]);
+    const view = this.view!,
+      drawing = view.layer.drawing;
+    if (!drawing)
+      throw Error(
+        "Слой моделей недоступен для снимка пары. Откройте 3D-окно проекта.",
+      );
+    const drawingVisible = drawing.visible,
+      annotationsVisible = view.annotations.visible,
+      previousSelection = new Set(view.layer.selectedObjects());
+    try {
+      if (!current) this.focus(clash, distance, false);
+      else this.highlight([clash.a.id, clash.b.id]);
+      view.pauseAnimation();
+      view.layer.clearSelected();
+      // Keep the pair overlay, hide the source drawing and all issue markers.
+      drawing.visible = false;
+      view.annotations.visible = false;
+      view.invalidate();
+      return await captureViewport(view, () => aborted() || !this.isCurrent());
+    } finally {
+      drawing.visible = drawingVisible;
+      view.annotations.visible = annotationsVisible;
+      view.layer.clearSelected();
+      view.layer.selectObjects((obj) => previousSelection.has(obj), true);
+      view.invalidate();
     }
-    return captureViewport(this.view!, () => aborted() || !this.isCurrent());
   }
   markers(
     results: Clash[],

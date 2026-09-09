@@ -3,12 +3,7 @@ export const isSnapshot = (value: unknown): value is string =>
   typeof value === "string" &&
   /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(value);
 export type State =
-  | "new"
-  | "active"
-  | "reviewed"
-  | "approved"
-  | "resolved"
-  | "excluded";
+  "new" | "active" | "reviewed" | "approved" | "resolved" | "excluded";
 export const stateNames: Record<State, string> = {
   new: "Новый",
   active: "Активный",
@@ -67,6 +62,7 @@ export interface Clash {
   firstSeen: string;
   lastSeen: string;
   image?: string;
+  imageScope?: "pair";
   penetrationMm?: number;
 }
 export interface Check {
@@ -142,37 +138,7 @@ export function matches(e: ElementInfo, s: Selection): boolean {
     !s.models.includes(e.modelId)
   )
     return false;
-  const pass = (c: Condition) => {
-    const raw = e.properties[c.field];
-    const v = (raw ?? "").toLocaleLowerCase();
-    const q = c.value.toLocaleLowerCase();
-    switch (c.op) {
-      case "exists":
-        return raw !== undefined && raw !== "";
-      case "eq":
-        return raw !== undefined && v === q;
-      case "ne":
-        return raw !== undefined && v !== q;
-      case "contains":
-        return raw !== undefined && v.includes(q);
-      case "gt":
-        return (
-          raw !== undefined &&
-          raw.trim() !== "" &&
-          Number(raw.replace(",", ".")) > Number(c.value.replace(",", "."))
-        );
-      case "lt":
-        return (
-          raw !== undefined &&
-          raw.trim() !== "" &&
-          Number(raw.replace(",", ".")) < Number(c.value.replace(",", "."))
-        );
-    }
-  };
-  return (
-    !s.conditions.length ||
-    (s.mode === "all" ? s.conditions.every(pass) : s.conditions.some(pass))
-  );
+  return true;
 }
 export const configKey = (c: Check) =>
   JSON.stringify([
@@ -270,11 +236,18 @@ export function readProject(text: string): Project {
         ["all", "any"].includes(set.selection.mode),
     )
   )
-    throw Error("Некорректные наборы параметров.");
-  for (const set of p.sets)
+    throw Error("Некорректные наборы моделей.");
+  const isProjectModel = (id: string) => /\.wdx(?:[?#].*)?$/i.test(id);
+  for (const set of p.sets) {
+    set.selection.models = set.selection.models.filter(
+      (id) => !isProjectModel(id),
+    );
+    set.selection.conditions = [];
+    set.selection.mode = "all";
     set.selection.modelsMode ??= set.selection.models.length
       ? "selected"
       : "all";
+  }
   for (const c of p.checks) {
     if (
       !c ||
@@ -315,6 +288,7 @@ export function readProject(text: string): Project {
     )
       throw Error("Некорректные правила проверки.");
     c.warnings ??= [];
+    c.modelsAtRun = c.modelsAtRun?.filter((id) => !isProjectModel(id));
     for (const s of [c.a, c.b]) {
       if (
         !s ||
@@ -337,10 +311,15 @@ export function readProject(text: string): Project {
       )
         throw Error("Некорректная выборка.");
       s.modelsMode ??= s.models.length ? "selected" : "all";
+      s.models = s.models.filter((id) => !isProjectModel(id));
+      s.conditions = [];
+      s.mode = "all";
     }
     for (const r of c.results) {
       if (r?.image !== undefined && !isSnapshot(r.image))
         throw Error("Некорректный снимок результата.");
+      if (r?.imageScope !== undefined && r.imageScope !== "pair")
+        throw Error("Некорректный состав снимка результата.");
       if (
         !r ||
         typeof r.id !== "string" ||

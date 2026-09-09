@@ -1,9 +1,9 @@
 import { helpHtml } from "./help";
+import { guardPanelResize } from "./resize";
 import { version as pluginVersion } from "../package.json";
 import {
   Check,
   Clash,
-  Condition,
   ParameterSet,
   Project,
   Selection,
@@ -33,6 +33,7 @@ export function mountPanel(
   host: ModelHost,
 ): () => void {
   const root = container.shadowRoot || container.attachShadow({ mode: "open" });
+  const disposeResize = guardPanelResize(container);
   let projectToken = host.projectToken(),
     saved = projectToken
       ? projects.get(projectToken) || emptyProject()
@@ -62,7 +63,7 @@ export function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор параметров</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
   const clearButton = document.createElement("button");
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
@@ -171,21 +172,6 @@ export function mountPanel(
       )
       .join("");
   }
-  function propertyValues(s: Selection, field: string) {
-    return [
-      ...new Set(
-        (snapshot?.elements || [])
-          .filter(
-            (item) =>
-              s.modelsMode !== "selected" || s.models.includes(item.modelId),
-          )
-          .map((item) => item.properties[field])
-          .filter((value): value is string => value !== undefined),
-      ),
-    ]
-      .sort()
-      .slice(0, 500);
-  }
   function renderSelection(s: Selection, side: "a" | "b") {
     const count =
       snapshot?.elements.filter(
@@ -209,28 +195,7 @@ export function mountPanel(
           `<option value="${e(set.id)}" ${s.presetId === set.id ? "selected" : ""}>${e(set.name)}</option>`,
       )
       .join("");
-    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span data-selection-count>${countText}</span></h3><p class="selection-mode">${s.manualOnly ? "Ручная выборка — только указанные элементы" : "Автоматическая выборка — модели и условия"}</p><div class="preset-row"><select class="preset"><option value="">Набор параметров…</option>${presets}</select><button data-selection="load-set">Применить</button><button data-selection="save-set">Сохранить как набор</button><button data-selection="delete-set" ${s.presetId ? "" : "disabled"}>Удалить</button></div><div class="model-list"><label class="model-all"><input type="checkbox" class="all-models" ${all ? "checked" : ""}> Все модели</label>${models.map((m) => `<label><input type="checkbox" class="model-check" value="${e(m.id)}" ${all || s.models.includes(m.id) ? "checked" : ""}> ${e(m.name)}</label>`).join("") || "<small>Нажмите «Обновить модели».</small>"}</div><small>Отмеченные файлы участвуют в этой стороне проверки. После выбора нажмите «Обновить модели», чтобы получить свойства и точное количество, либо сразу запустите проверку.</small><div class="selection-tools"><button data-selection="show">Показать выборку</button><button data-selection="only">Только выделенные</button><button data-selection="include">＋ Добавить выделенные</button><button data-selection="exclude">− Исключить выделенные</button><button data-selection="reset">Вернуть автоматический выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small><label>Условия<select class="mode"><option value="all" ${s.mode === "all" ? "selected" : ""}>Выполнены все (И)</option><option value="any" ${s.mode === "any" ? "selected" : ""}>Выполнено любое (ИЛИ)</option></select></label><div class="conditions">${s.conditions
-      .map((c, i) => {
-        const values = propertyValues(s, c.field);
-        return `<div class="condition" data-condition="${i}"><input class="field" list="property-fields" value="${e(c.field)}" placeholder="Свойство"><select class="op">${[
-          ["eq", "равно"],
-          ["contains", "содержит"],
-          ["ne", "не равно"],
-          ["exists", "существует"],
-          ["gt", "больше"],
-          ["lt", "меньше"],
-        ]
-          .map(
-            ([k, v]) =>
-              `<option value="${k}" ${c.op === k ? "selected" : ""}>${v}</option>`,
-          )
-          .join(
-            "",
-          )}</select><input class="value" list="values-${side}-${i}" value="${e(c.value)}" placeholder="Значение" ${c.op === "exists" ? "disabled" : ""}><datalist id="values-${side}-${i}">${values.map((value) => `<option value="${e(value)}"></option>`).join("")}</datalist><button data-remove="${i}" aria-label="Удалить условие">×</button></div>`;
-      })
-      .join(
-        "",
-      )}</div><button data-selection="add">＋ Условие</button></article>`;
+    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span data-selection-count>${countText}</span></h3>${s.manualOnly ? '<p class="selection-mode">Только элементы, выбранные вручную</p>' : ""}<div class="preset-row"><select class="preset"><option value="">Набор моделей…</option>${presets}</select><button data-selection="load-set">Применить</button><button data-selection="save-set">Сохранить набор</button><button data-selection="delete-set" ${s.presetId ? "" : "disabled"}>Удалить</button></div><div class="model-list"><label class="model-all"><input type="checkbox" class="all-models" ${all ? "checked" : ""}> Все модели</label>${models.map((m) => `<label><input type="checkbox" class="model-check" value="${e(m.id)}" ${all || s.models.includes(m.id) ? "checked" : ""}> ${e(m.name)}</label>`).join("") || "<small>Нажмите «Обновить модели».</small>"}</div><small>Отметьте файлы, которые должны участвовать в выборе ${side.toUpperCase()}.</small><div class="selection-tools"><button data-selection="show">Показать выбранные элементы</button><button data-selection="only">Только выделенные в 3D</button><button data-selection="include">＋ Добавить из 3D</button><button data-selection="exclude">− Исключить из 3D</button><button data-selection="reset">Сбросить ручной выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small></article>`;
   }
   function render() {
     renderChecks();
@@ -247,7 +212,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● Пересекающиеся элементы</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -292,7 +257,7 @@ export function mountPanel(
   function renderDetail() {
     const r = check()?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● А — красный</span><span class="part-b">● Б — синий</span></p><p>${check()?.type === "duplicates" ? "Дублирование" : `Расчётное вхождение: ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Сохранить текущий ракурс</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● Пересекающиеся элементы выделены красным</span></p><p>${check()?.type === "duplicates" ? "Дублирование" : `Расчётное вхождение: ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Снимок пары</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -331,6 +296,24 @@ export function mountPanel(
       }
     }
     return [...ids];
+  };
+  const syncVisibleModelSelections = () => {
+    const c = check();
+    if (!c || tab !== "select") return;
+    for (const article of root.querySelectorAll<HTMLElement>("[data-side]")) {
+      const side = article.dataset.side as "a" | "b",
+        boxes = [...article.querySelectorAll<HTMLInputElement>(".model-check")];
+      if (!boxes.length) continue;
+      const values = boxes
+          .filter((item) => item.checked)
+          .map((item) => item.value),
+        all = values.length === boxes.length,
+        s = c[side];
+      s.modelsMode = all ? "all" : "selected";
+      s.models = all ? [] : values;
+      s.conditions = [];
+      s.mode = "all";
+    }
   };
   const scanScope = (targets?: Check[]) => {
     if (!targets?.length) return undefined;
@@ -498,10 +481,16 @@ export function mountPanel(
   async function run(all = false) {
     if (busy) return;
     switchProject();
+    syncVisibleModelSelections();
     const targets = all
       ? [...saved.checks]
       : ([check()].filter(Boolean) as Check[]);
     if (!targets.length) throw Error("Создайте проверку.");
+    for (const c of targets)
+      for (const s of [c.a, c.b]) {
+        s.conditions = [];
+        s.mode = "all";
+      }
     aborted = false;
     setBusy(true);
     try {
@@ -574,13 +563,9 @@ export function mountPanel(
   }
   function editSelection(target: HTMLElement) {
     const side = target.closest<HTMLElement>("[data-side]")?.dataset.side as
-      | "a"
-      | "b"
-      | undefined;
+      "a" | "b" | undefined;
     if (!side) return;
-    const s = check()![side],
-      index =
-        target.closest<HTMLElement>("[data-condition]")?.dataset.condition;
+    const s = check()![side];
     const input = target as HTMLInputElement;
     const article = target.closest<HTMLElement>("[data-side]")!;
     if (input.classList.contains("preset")) {
@@ -612,30 +597,8 @@ export function mountPanel(
       s.manualOnly = false;
       s.presetId = undefined;
     }
-    if (input.classList.contains("mode")) {
-      s.mode = input.value as Selection["mode"];
-      s.presetId = undefined;
-    }
-    if (index !== undefined) {
-      const c = s.conditions[Number(index)];
-      if (input.classList.contains("field")) {
-        c.field = input.value;
-        input
-          .closest<HTMLElement>(".condition")!
-          .querySelector("datalist")!.innerHTML = propertyValues(s, c.field)
-          .map((value) => `<option value="${e(value)}"></option>`)
-          .join("");
-      }
-      if (input.classList.contains("op")) {
-        c.op = input.value as Condition["op"];
-        const value = input
-          .closest<HTMLElement>(".condition")!
-          .querySelector<HTMLInputElement>(".value")!;
-        value.disabled = c.op === "exists";
-      }
-      if (input.classList.contains("value")) c.value = input.value;
-      s.presetId = undefined;
-    }
+    s.conditions = [];
+    s.mode = "all";
     stale();
     refreshSelectionCounts();
   }
@@ -652,6 +615,7 @@ export function mountPanel(
   };
   q("scan").onclick = () =>
     action(async () => {
+      syncVisibleModelSelections();
       aborted = false;
       setBusy(true);
       try {
@@ -732,7 +696,7 @@ export function mountPanel(
     if (!saved.checks.length && !saved.sets.length) return;
     if (
       !confirm(
-        "Очистить проверки, наборы параметров и результаты текущего проекта?",
+        "Очистить проверки, наборы моделей и результаты текущего проекта?",
       )
     )
       return;
@@ -897,101 +861,94 @@ export function mountPanel(
         b = t.closest<HTMLButtonElement>("button"),
         c = check();
       if (!c) return;
-      if (b?.dataset.selection || b?.dataset.remove !== undefined) {
+      if (b?.dataset.selection) {
         const side = b.closest<HTMLElement>("[data-side]")!.dataset.side as
-            | "a"
-            | "b",
+            "a" | "b",
           s = c[side];
         const scrollTop = q("content").scrollTop;
         let affectsSelection = true;
-        if (b.dataset.remove !== undefined)
-          s.conditions.splice(Number(b.dataset.remove), 1);
-        else
-          switch (b.dataset.selection) {
-            case "load-set": {
-              const set = saved.sets.find((item) => item.id === s.presetId);
-              if (!set) throw Error("Выберите сохранённый набор параметров.");
-              Object.assign(s, structuredClone(set.selection), {
-                include: [],
-                exclude: [],
-                manualOnly: false,
-                presetId: set.id,
-              });
-              break;
-            }
-            case "save-set": {
-              if (s.manualOnly)
-                throw Error(
-                  "Ручную выборку элементов нельзя сохранить как набор параметров.",
-                );
-              const name = await requestSetName();
-              if (!name) return;
-              const set: ParameterSet = {
-                id: crypto.randomUUID(),
-                name,
-                selection: {
-                  models: [...s.models],
-                  modelsMode: s.modelsMode,
-                  conditions: structuredClone(s.conditions),
-                  mode: s.mode,
-                },
-              };
-              saved.sets.push(set);
-              s.presetId = set.id;
-              affectsSelection = false;
-              break;
-            }
-            case "delete-set": {
-              const set = saved.sets.find((item) => item.id === s.presetId);
-              if (!set) throw Error("Выберите сохранённый набор параметров.");
-              if (!confirm(`Удалить набор «${set.name}»?`)) return;
-              saved.sets = saved.sets.filter((item) => item.id !== set.id);
-              for (const item of saved.checks)
-                for (const selection of [item.a, item.b])
-                  if (selection.presetId === set.id)
-                    selection.presetId = undefined;
-              affectsSelection = false;
-              break;
-            }
-            case "add":
-              s.conditions.push({ field: "Имя", op: "contains", value: "" });
-              break;
-            case "show":
-              host.select(
-                (snapshot?.elements || [])
-                  .filter(
-                    (x) => (c.includeHidden || !x.hidden) && matches(x, s),
-                  )
-                  .map((x) => x.id),
-              );
-              return;
-            case "only": {
-              const ids = host.selected();
-              if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
-              s.include = ids;
-              s.exclude = [];
-              s.manualOnly = true;
-              break;
-            }
-            case "include": {
-              const ids = host.selected();
-              if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
-              s.include = [...new Set([...s.include, ...ids])];
-              s.exclude = s.exclude.filter((id) => !ids.includes(id));
-              break;
-            }
-            case "exclude": {
-              const ids = host.selected();
-              if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
-              s.exclude = [...new Set([...s.exclude, ...ids])];
-              s.include = s.include.filter((id) => !ids.includes(id));
-              break;
-            }
-            case "reset":
-              s.manualOnly = false;
-              s.include = [];
-              s.exclude = [];
+        switch (b.dataset.selection) {
+          case "load-set": {
+            const set = saved.sets.find((item) => item.id === s.presetId);
+            if (!set) throw Error("Выберите сохранённый набор моделей.");
+            Object.assign(s, structuredClone(set.selection), {
+              conditions: [],
+              mode: "all",
+              include: [],
+              exclude: [],
+              manualOnly: false,
+              presetId: set.id,
+            });
+            break;
           }
+          case "save-set": {
+            if (s.manualOnly)
+              throw Error(
+                "Ручную выборку элементов нельзя сохранить как набор моделей.",
+              );
+            const name = await requestSetName();
+            if (!name) return;
+            const set: ParameterSet = {
+              id: crypto.randomUUID(),
+              name,
+              selection: {
+                models: [...s.models],
+                modelsMode: s.modelsMode,
+                conditions: [],
+                mode: "all",
+              },
+            };
+            saved.sets.push(set);
+            s.presetId = set.id;
+            affectsSelection = false;
+            break;
+          }
+          case "delete-set": {
+            const set = saved.sets.find((item) => item.id === s.presetId);
+            if (!set) throw Error("Выберите сохранённый набор моделей.");
+            if (!confirm(`Удалить набор «${set.name}»?`)) return;
+            saved.sets = saved.sets.filter((item) => item.id !== set.id);
+            for (const item of saved.checks)
+              for (const selection of [item.a, item.b])
+                if (selection.presetId === set.id)
+                  selection.presetId = undefined;
+            affectsSelection = false;
+            break;
+          }
+          case "show":
+            host.select(
+              (snapshot?.elements || [])
+                .filter((x) => (c.includeHidden || !x.hidden) && matches(x, s))
+                .map((x) => x.id),
+            );
+            return;
+          case "only": {
+            const ids = host.selected();
+            if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
+            s.include = ids;
+            s.exclude = [];
+            s.manualOnly = true;
+            break;
+          }
+          case "include": {
+            const ids = host.selected();
+            if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
+            s.include = [...new Set([...s.include, ...ids])];
+            s.exclude = s.exclude.filter((id) => !ids.includes(id));
+            break;
+          }
+          case "exclude": {
+            const ids = host.selected();
+            if (!ids.length) throw Error("Выделите элементы в 3D-сцене.");
+            s.exclude = [...new Set([...s.exclude, ...ids])];
+            s.include = s.include.filter((id) => !ids.includes(id));
+            break;
+          }
+          case "reset":
+            s.manualOnly = false;
+            s.include = [];
+            s.exclude = [];
+        }
         affectsSelection ? stale() : mark();
         render();
         q("content").scrollTop = scrollTop;
@@ -1032,6 +989,7 @@ export function mountPanel(
               () => aborted,
               true,
             );
+            r.imageScope = "pair";
             mark();
             renderDetail();
             note("Снимок сохранён в результат.");
@@ -1088,13 +1046,14 @@ export function mountPanel(
                   "Подготовка отчёта отменена. Уже полученные снимки сохранены.",
                 );
               note("Подготовка снимков: " + ++i + " / " + rows.length);
-              if (!row.image) {
+              if (!row.image || row.imageScope !== "pair") {
                 if (row.state === "resolved" && !host.canLocate(row)) continue;
                 row.image = await host.snapshot(
                   row,
                   Number(q<HTMLInputElement>("distance").value),
                   () => aborted,
                 );
+                row.imageScope = "pair";
                 mark();
               }
             }
@@ -1115,7 +1074,9 @@ export function mountPanel(
           }
         }
         const exportRows = q<HTMLInputElement>("report-images").checked
-          ? rows
+          ? rows.map((r) =>
+              r.imageScope === "pair" ? r : { ...r, image: undefined },
+            )
           : rows.map((r) => ({ ...r, image: undefined }));
         download(
           c.name + (b.id === "export-html" ? ".html" : ".collision360.json"),
@@ -1161,6 +1122,7 @@ export function mountPanel(
   }, 1500);
   render();
   return () => {
+    disposeResize();
     clearInterval(contextTimer);
     aborted = true;
     cancelWorker?.();

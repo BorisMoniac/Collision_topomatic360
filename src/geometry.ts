@@ -379,7 +379,9 @@ export async function calculate(
     a = chosen.filter((e) => matches(e, check.a)),
     b = chosen.filter((e) => matches(e, check.b));
   if (!a.length || !b.length)
-    throw Error("Выборка А или Б пуста. Проверьте модели и условия.");
+    throw Error(
+      "Выборка А или Б не содержит элементов. Отметьте хотя бы одну модель в каждой стороне проверки.",
+    );
   let tick = performance.now();
   const checkpoint = async () => {
     if (aborted())

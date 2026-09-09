@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/albatros/schema.json",
   "name": "nashepo.collisionfinder360",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "displayName": "НашеПО · Проверки коллизий",
   "description": "Поиск пересечений и дубликатов между настраиваемыми выборками в Топоматик 360",
   "author": {
