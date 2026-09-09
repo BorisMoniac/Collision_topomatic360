@@ -54,20 +54,23 @@ export function mountPanel(
   const check = () => saved.checks.find((c) => c.id === current);
   const q = <T extends HTMLElement = HTMLElement>(id: string) =>
     root.querySelector<T>("#" + id)!;
-  root.innerHTML = `<style>${css}</style><main><header><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>${pluginVersion}</small></div><button id="scan">Обновить модели</button><button id="new" class="primary">＋ Проверка</button><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="settings">⚙</button><button id="help">Справка</button><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Обновить модели».</div><div class="workspace"><aside><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><button id="all">Запустить все</button></aside><section class="main"><div class="test-toolbar"><input id="name" aria-label="Имя проверки" placeholder="Имя проверки"><button id="copy">Копировать</button><button id="delete">Удалить</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button></div><div id="tabs" class="tabs">${[
-    ["rules", "Правила"],
-    ["select", "Выбрать"],
+  root.innerHTML = `<style>${css}</style><main><header class="commandbar"><div class="brand"><img src="${brandLogo}" alt=""><b>НашеПО</b><small>${pluginVersion}</small></div><div class="check-heading"><input id="name" aria-label="Имя проверки" placeholder="Выберите проверку"><small id="check-summary">Проверка не выбрана</small></div><div id="tabs" class="tabs">${[
+    ["select", "Выбор"],
     ["results", "Результаты"],
+    ["rules", "Правила"],
     ["report", "Отчёт"],
   ]
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
   const clearButton = document.createElement("button");
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
   q("save").after(clearButton);
+  root.querySelector(".more-popover")!.addEventListener("click", () =>
+    root.querySelector(".more-menu")!.removeAttribute("open"),
+  );
   const note = (text: string, error = false) => {
     q("notice").textContent = text;
     q("notice").classList.toggle("error", error);
@@ -195,12 +198,15 @@ export function mountPanel(
           `<option value="${e(set.id)}" ${s.presetId === set.id ? "selected" : ""}>${e(set.name)}</option>`,
       )
       .join("");
-    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span data-selection-count>${countText}</span></h3>${s.manualOnly ? '<p class="selection-mode">Только элементы, выбранные вручную</p>' : ""}<div class="preset-row"><select class="preset"><option value="">Набор моделей…</option>${presets}</select><button data-selection="load-set">Применить</button><button data-selection="save-set">Сохранить набор</button><button data-selection="delete-set" ${s.presetId ? "" : "disabled"}>Удалить</button></div><div class="model-list"><label class="model-all"><input type="checkbox" class="all-models" ${all ? "checked" : ""}> Все модели</label>${models.map((m) => `<label><input type="checkbox" class="model-check" value="${e(m.id)}" ${all || s.models.includes(m.id) ? "checked" : ""}> ${e(m.name)}</label>`).join("") || "<small>Нажмите «Обновить модели».</small>"}</div><small>Отметьте файлы, которые должны участвовать в выборе ${side.toUpperCase()}.</small><div class="selection-tools"><button data-selection="show">Показать выбранные элементы</button><button data-selection="only">Только выделенные в 3D</button><button data-selection="include">＋ Добавить из 3D</button><button data-selection="exclude">− Исключить из 3D</button><button data-selection="reset">Сбросить ручной выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small></article>`;
+    return `<article class="selection" data-side="${side}"><h3>Выбор ${side.toUpperCase()} <span data-selection-count>${countText}</span></h3>${s.manualOnly ? '<p class="selection-mode">Только элементы, выбранные вручную</p>' : ""}<div class="preset-row"><select class="preset"><option value="">Набор моделей…</option>${presets}</select><button data-selection="load-set">Применить</button><button data-selection="save-set">Сохранить набор</button><button data-selection="delete-set" ${s.presetId ? "" : "disabled"}>Удалить</button></div><div class="model-list"><label class="model-all"><input type="checkbox" class="all-models" ${all ? "checked" : ""}> Все модели</label>${models.map((m) => `<label><input type="checkbox" class="model-check" value="${e(m.id)}" ${all || s.models.includes(m.id) ? "checked" : ""}> ${e(m.name)}</label>`).join("") || "<small>Нажмите «Модели».</small>"}</div><small>Отметьте файлы, которые должны участвовать в выборе ${side.toUpperCase()}.</small><div class="selection-tools"><button data-selection="show">Показать выбранные элементы</button><button data-selection="only">Только выделенные в 3D</button><button data-selection="include">＋ Добавить из 3D</button><button data-selection="exclude">− Исключить из 3D</button><button data-selection="reset">Сбросить ручной выбор</button></div><small>Добавлено вручную: ${s.include.length} · исключено: ${s.exclude.length}</small></article>`;
   }
   function render() {
     renderChecks();
     const c = check();
     q<HTMLInputElement>("name").value = c?.name || "";
+    q("check-summary").textContent = c
+      ? `${{ new: "Не выполнена", done: "Выполнена", stale: "Устарела" }[c.status]} · ${c.results.filter((r) => !["resolved", "excluded"].includes(r.state)).length} в работе / ${c.results.length}`
+      : "Проверка не выбрана";
     for (const id of ["name", "copy", "delete", "run"])
       q<HTMLInputElement>(id).disabled = !c || busy;
     for (const b of root.querySelectorAll<HTMLElement>("[data-tab]"))
@@ -212,25 +218,21 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● Пересекающиеся элементы</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшим расчётным вхождением не попадут в результат">Минимальное вхождение, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Касание — соприкосновение поверхностей без проникновения. Обычно выключено. Вхождение для произвольной IFC-геометрии является расчётной оценкой.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
     if (tab === "results") {
       q("content").innerHTML =
-        `<div class="result-tools"><input id="result-search" type="search" placeholder="Поиск по результатам"><select id="result-state"><option value="">Все состояния</option>${Object.entries(
+        `<div class="result-tools"><div class="result-filters"><input id="result-search" type="search" placeholder="Поиск по результатам"><select id="result-state"><option value="">Все состояния</option>${Object.entries(
           stateNames,
         )
           .map(([k, v]) => `<option value="${k}">${v}</option>`)
-          .join(
-            "",
-          )}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Вхождение от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки включены" : "○ Знаки выключены"}</button><select id="bulk-state">${Object.entries(
-          stateNames,
-        )
-          .map(([k, v]) => `<option value="${k}">${v}</option>`)
-          .join(
-            "",
-          )}</select><button id="bulk">Применить к выбранным</button></div><div class="result-area"><div class="table-area"><div class="scroll" id="table"></div><div class="pager"><button id="prev-page">←</button><span id="page"></span><button id="next-page">→</button><span id="selection-count"></span></div></div><div class="detail" id="detail"></div></div>`;
+          .join("")}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Вхождение от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки" : "○ Знаки"}</button><span id="result-count"></span></div><div class="bulk-tools"><select id="bulk-state" title="Состояние для выбранных строк">${Object.entries(
+            stateNames,
+          )
+            .map(([k, v]) => `<option value="${k}">${v}</option>`)
+            .join("")}</select><button id="bulk">Применить</button></div></div><div class="result-area"><div class="table-area"><div class="scroll" id="table"></div><div class="pager"><span id="selection-count"></span><button id="prev-page">←</button><span id="page"></span><button id="next-page">→</button></div></div><div class="detail" id="detail"></div></div>`;
       renderTable();
       renderDetail();
     }
@@ -249,15 +251,19 @@ export function mountPanel(
       ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Вхождение, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], c.type === "duplicates" ? "—" : (r.penetrationMm ?? 0).toFixed(1), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : '<div class="empty">Нет результатов. Запустите проверку или измените фильтры.</div>';
     q("page").textContent =
-      `Страница ${page + 1} из ${pages} · ${rows.length} результатов`;
+      `${page + 1} / ${pages}`;
+    q("result-count").textContent = `${rows.length} результатов`;
     q("selection-count").textContent = `Выбрано: ${checked.size}`;
     q<HTMLButtonElement>("prev-page").disabled = page === 0;
     q<HTMLButtonElement>("next-page").disabled = page === pages - 1;
   }
   function renderDetail() {
-    const r = check()?.results.find((x) => x.id === selected);
+    const c = check(),
+      rows = resultRows(),
+      position = rows.findIndex((x) => x.id === selected),
+      r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<h3>${e(r.a.name)} × ${e(r.b.name)}</h3><p class="legend"><span class="part-a">● Пересекающиеся элементы выделены красным</span></p><p>${check()?.type === "duplicates" ? "Дублирование" : `Расчётное вхождение: ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</p>${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : ""}<button id="capture-image">Снимок пары</button><div class="selection-tools"><button id="focus" class="primary">Перейти в 3D</button><button id="previous">←</button><button id="next">→</button></div><p>${r.point.map((v, i) => `${["X", "Y", "Z"][i]}: ${v.toFixed(4)}`).join(" · ")}</p><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span>${c?.type === "duplicates" ? "Совпадение геометрии" : `Вхождение ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок пары ещё не создан</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -266,7 +272,7 @@ export function mountPanel(
           )
           .join(
             "",
-          )}</select></label><label>Назначение<input id="assignee" value="${e(r.assignee)}"></label><label>Комментарий<textarea id="note" rows="3">${e(r.note)}</textarea></label>${[
+          )}</select></label><label>Назначение<input id="assignee" value="${e(r.assignee)}"></label><label>Комментарий<textarea id="note" rows="2">${e(r.note)}</textarea></label>${[
           r.a,
           r.b,
         ]
@@ -278,8 +284,8 @@ export function mountPanel(
                 .map(([k, v]) => `<dt>${e(k)}</dt><dd>${e(v)}</dd>`)
                 .join("")}</dl></details>`,
           )
-          .join("")}`
-      : "<p>Выберите конфликт в таблице.</p>";
+          .join("")}</div>`
+      : '<div class="detail-empty"><span>◫</span><p>Выберите коллизию в таблице</p><small>Двойной щелчок сразу перенесёт камеру в 3D.</small></div>';
   }
   const selectionModelIds = (s: Selection): string[] => {
     const ids = new Set(
@@ -368,7 +374,7 @@ export function mountPanel(
     if (focus) {
       const r = check()?.results.find((x) => x.id === id);
       if (r) {
-        if (r.image && r.imageScope === "pair")
+        if (r.image && r.imageScope === "pair-ab")
           host.focus(r, Number(q<HTMLInputElement>("distance").value));
         else void previewPair(r);
       }
@@ -383,7 +389,7 @@ export function mountPanel(
         Number(q<HTMLInputElement>("distance").value),
         () => aborted,
       );
-      r.imageScope = "pair";
+      r.imageScope = "pair-ab";
       mark();
       if (tab === "results" && selected === r.id) renderDetail();
     } catch (error) {
@@ -1017,7 +1023,7 @@ export function mountPanel(
               () => aborted,
               true,
             );
-            r.imageScope = "pair";
+            r.imageScope = "pair-ab";
             mark();
             renderDetail();
             note("Снимок сохранён в результат.");
@@ -1075,7 +1081,7 @@ export function mountPanel(
                   "Подготовка отчёта отменена. Уже полученные снимки сохранены.",
                 );
               note("Подготовка снимков: " + ++i + " / " + rows.length);
-              if (!row.image || row.imageScope !== "pair") {
+              if (!row.image || row.imageScope !== "pair-ab") {
                 if (row.state === "resolved" && !host.canLocate(row)) continue;
                 try {
                   row.image = await host.snapshot(
@@ -1083,7 +1089,7 @@ export function mountPanel(
                     Number(q<HTMLInputElement>("distance").value),
                     () => aborted,
                   );
-                  row.imageScope = "pair";
+                  row.imageScope = "pair-ab";
                   mark();
                 } catch (error) {
                   if (aborted || !host.isCurrent()) throw error;
@@ -1109,7 +1115,7 @@ export function mountPanel(
         }
         const exportRows = q<HTMLInputElement>("report-images").checked
           ? rows.map((r) =>
-              r.imageScope === "pair" ? r : { ...r, image: undefined },
+              r.imageScope === "pair-ab" ? r : { ...r, image: undefined },
             )
           : rows.map((r) => ({ ...r, image: undefined }));
         download(

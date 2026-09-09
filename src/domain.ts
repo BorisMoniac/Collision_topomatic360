@@ -62,7 +62,7 @@ export interface Clash {
   firstSeen: string;
   lastSeen: string;
   image?: string;
-  imageScope?: "pair";
+  imageScope?: "pair" | "pair-ab";
   penetrationMm?: number;
 }
 export interface Check {
@@ -318,7 +318,11 @@ export function readProject(text: string): Project {
     for (const r of c.results) {
       if (r?.image !== undefined && !isSnapshot(r.image))
         throw Error("Некорректный снимок результата.");
-      if (r?.imageScope !== undefined && r.imageScope !== "pair")
+      if (
+        r?.imageScope !== undefined &&
+        r.imageScope !== "pair" &&
+        r.imageScope !== "pair-ab"
+      )
         throw Error("Некорректный состав снимка результата.");
       if (
         !r ||

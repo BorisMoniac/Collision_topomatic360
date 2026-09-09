@@ -431,7 +431,7 @@ export class ModelHost {
     if (!this.refs.has(clash.a.id) || !this.refs.has(clash.b.id))
       throw Error("Один из элементов отсутствует в загруженных моделях.");
     this.select([clash.a.id, clash.b.id]);
-    this.highlight([clash.a.id, clash.b.id]);
+    this.highlight(clash);
     const p = clash.point,
       v = this.view!;
     if (v.camera?.id !== "3d") v.setCameraType("3d");
@@ -446,38 +446,42 @@ export class ModelHost {
       p,
     );
   }
-  private highlight(ids: string[]) {
+  private highlight(clash: Clash) {
     this.overlayError = undefined;
     if (this.overlay) {
       this.overlay.view.layer.removeLayer(this.overlay.layer);
       this.overlay = undefined;
     }
     const view = this.view!,
-      objects = [...new Set(ids.flatMap((id) => this.refs.get(id) || []))];
-    const color = 0xff3636ff;
-    const surfaces = objects.flatMap((obj) =>
-      Object.values(obj.meshes).flatMap((mesh) => {
-        const source = mesh.geometry;
-        if (!source) return [];
-        const geometry: UuidGeometry3d = {
-          // SDK fields may be prototype getters rather than own properties.
-          uuid: overlayId + "." + source.uuid,
-          vertices: source.vertices,
-          indices: source.indices,
-          normals: source.normals,
-          bounds: source.bounds,
-          colors: new Uint32Array(source.vertices.length / 3).fill(color),
-        };
-        return [{ obj, geometry }];
-      }),
+      sides = [
+        { id: clash.a.id, color: 0xff3636ff },
+        { id: clash.b.id, color: 0x368bffff },
+      ];
+    const surfaces = sides.flatMap(({ id, color }, side) =>
+      [...new Set(this.refs.get(id) || [])].flatMap((obj) =>
+        Object.values(obj.meshes).flatMap((mesh) => {
+          const source = mesh.geometry;
+          if (!source) return [];
+          const geometry: UuidGeometry3d = {
+            // SDK fields may be prototype getters rather than own properties.
+            uuid: `${overlayId}.${side}.${source.uuid}`,
+            vertices: source.vertices,
+            indices: source.indices,
+            normals: source.normals,
+            bounds: source.bounds,
+            colors: new Uint32Array(source.vertices.length / 3).fill(color),
+          };
+          return [{ obj, geometry, color }];
+        }),
+      ),
     );
     const paint = (dc: DeviceContext) => {
       const old = dc.color,
         material = dc.rasterizer.material;
-      dc.color = color;
       dc.rasterizer.material = undefined;
       try {
-        for (const { obj, geometry } of surfaces) {
+        for (const { obj, geometry, color } of surfaces) {
+          dc.color = color;
           dc.pushMatrix();
           try {
             dc.multMatrix(obj.matrix);
@@ -545,7 +549,7 @@ export class ModelHost {
       previousSelection = new Set(view.layer.selectedObjects());
     try {
       if (!current) this.focus(clash, distance, false);
-      else this.highlight([clash.a.id, clash.b.id]);
+      else this.highlight(clash);
       view.pauseAnimation();
       view.layer.clearSelected();
       // Keep the pair overlay, hide the source drawing and all issue markers.
