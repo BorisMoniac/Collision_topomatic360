@@ -22,6 +22,12 @@ const cross = (a: Vec, b: Vec): Vec => [
   a[0] * b[1] - a[1] * b[0],
 ];
 const norm = (a: Vec) => Math.hypot(...a);
+const unit = (a: Vec): Vec | undefined => {
+  const length = norm(a);
+  return length > 1e-20
+    ? [a[0] / length, a[1] / length, a[2] / length]
+    : undefined;
+};
 export const triangleCount = (e: GeometryElement) =>
   e.triangleCount ??
   (e.indices ? e.indices.length / 3 : e.triangles.length / 9);
@@ -81,6 +87,31 @@ function* query(n: Node, box: Box, eps: number): Generator<number> {
     yield* query(n.left!, box, eps);
     yield* query(n.right!, box, eps);
   }
+}
+function* queryPairs(
+  a: Node,
+  b: Node,
+  eps: number,
+): Generator<[number, number]> {
+  if (!overlap(a, b, eps)) return;
+  if (a.ids && b.ids) {
+    for (const ai of a.ids) for (const bi of b.ids) yield [ai, bi];
+    return;
+  }
+  if (a.ids) {
+    yield* queryPairs(a, b.left!, eps);
+    yield* queryPairs(a, b.right!, eps);
+    return;
+  }
+  if (b.ids) {
+    yield* queryPairs(a.left!, b, eps);
+    yield* queryPairs(a.right!, b, eps);
+    return;
+  }
+  yield* queryPairs(a.left!, b.left!, eps);
+  yield* queryPairs(a.left!, b.right!, eps);
+  yield* queryPairs(a.right!, b.left!, eps);
+  yield* queryPairs(a.right!, b.right!, eps);
 }
 function buildElements(elements: GeometryElement[], ids: number[]): Node {
   const box: Box = {
@@ -204,6 +235,24 @@ export function trianglesIntersect(
     if (q) return q;
   }
 }
+/**
+ * Local triangle-pair penetration used by normal Hard Clash methods.
+ * For each triangle plane, move the other triangle to the nearer side of the
+ * plane. The smaller of the two face-normal translations is the pair depth.
+ * Unlike an AABB overlap, this value follows the actual triangle orientation.
+ */
+function trianglePairPenetration(a: Vec[], b: Vec[]): number {
+  const alongPlane = (plane: Vec[], moving: Vec[]) => {
+    const n = unit(cross(sub(plane[1], plane[0]), sub(plane[2], plane[0])));
+    if (!n) return Infinity;
+    const distances = moving.map((p) => dot(sub(p, plane[0]), n));
+    const min = Math.min(...distances),
+      max = Math.max(...distances);
+    if (!(min < 0 && max > 0)) return 0;
+    return Math.min(-min, max);
+  };
+  return Math.min(alongPlane(a, b), alongPlane(b, a));
+}
 function pointOnTriangle(p: Vec, t: Vec[], eps: number): boolean {
   const u = sub(t[1], t[0]),
     v = sub(t[2], t[0]),
@@ -320,11 +369,11 @@ async function penetrationEstimate(
   xt: Node,
   yt: Node,
   point: Vec,
+  triangleDepth: number,
   eps: number,
   checkpoint: () => Promise<void>,
 ): Promise<number> {
-  if (!x.closed || !y.closed) return 0;
-  let depth = 0;
+  let depth = triangleDepth;
   const measure = (p: Vec, other: GeometryElement, tree: Node) => {
     if (inside(p, other, tree, eps))
       depth = Math.max(depth, nearestSurface(p, other, tree));
@@ -351,7 +400,7 @@ async function penetrationEstimate(
   }
   // AABB overlap is not a penetration depth. For pipes and fittings it often
   // equals a diameter even when only faceted boundary surfaces meet.
-  return depth > eps ? depth * 1000 : 0;
+  return depth >= eps ? depth * 1000 : 0;
 }
 export interface RunProgress {
   phase: string;
@@ -520,15 +569,32 @@ export async function calculate(
       } else {
         const xt = getTree(x),
           yt = getTree(y);
-        for (let i = 0; i < triangleCount(x) && !point; i++) {
-          const t = tri(x, i),
-            box = bounds(t.flat());
-          for (const j of query(yt, box, eps)) {
-            point = trianglesIntersect(t, tri(y, j), eps, check.touching);
-            if (point) break;
+        let triangleDepth = 0,
+          testedPairs = 0;
+        for (const [i, j] of queryPairs(xt, yt, eps)) {
+          const tx = tri(x, i),
+            ty = tri(y, j);
+          if (!overlap(bounds(tx.flat()), bounds(ty.flat()), eps)) continue;
+          const hit = trianglesIntersect(tx, ty, eps, check.touching);
+          if (hit) {
+            const localDepth = check.touching
+              ? trianglePairPenetration(tx, ty)
+              : Math.max(trianglePairPenetration(tx, ty), eps);
+            if (!point || localDepth > triangleDepth) point = hit;
+            triangleDepth = Math.max(triangleDepth, localDepth);
+          }
+          if (++testedPairs % 256 === 0) {
+            if (performance.now() - lastProgress > 150) {
+              lastProgress = performance.now();
+              progress({
+                phase: `Геометрия пары · A ${ai + 1}/${a.length}`,
+                done: ai,
+                total: a.length,
+                found: found.length,
+              });
+            }
             await checkpoint();
           }
-          await checkpoint();
         }
         if (!point && x.closed && y.closed) {
           const center = x.bounds.min.map(
@@ -568,6 +634,7 @@ export async function calculate(
             xt,
             yt,
             point,
+            triangleDepth,
             eps,
             checkpoint,
           );

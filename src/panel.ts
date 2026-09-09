@@ -73,7 +73,9 @@ export function mountPanel(
     show = true,
     dirty = false;
   const checked = new Set<string>();
-  let cancelWorker: (() => void) | undefined;
+  let cancelWorker: (() => void) | undefined,
+    previewTimer: number | undefined,
+    previewToken = 0;
   const check = () => saved.checks.find((c) => c.id === current);
   const q = <T extends HTMLElement = HTMLElement>(id: string) =>
     root.querySelector<T>("#" + id)!;
@@ -86,7 +88,7 @@ export function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div id="run-progress" class="run-progress" hidden><span id="run-phase">Подготовка</span><progress id="run-bar"></progress><span id="run-value"></span></div><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div id="run-progress" class="run-progress" hidden><span id="run-phase">Подготовка</span><div id="run-bar" class="run-bar" role="progressbar"><i id="run-fill"></i></div><span id="run-value"></span></div><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
   const clearButton = document.createElement("button");
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
@@ -105,22 +107,30 @@ export function mountPanel(
     found?: number,
   ) => {
     const box = q("run-progress"),
-      bar = q<HTMLProgressElement>("run-bar");
+      bar = q("run-bar"),
+      fill = q("run-fill");
     box.hidden = false;
+    q("notice").hidden = true;
     q("run-phase").textContent = label;
     if (total && total > 0 && done !== undefined) {
-      bar.max = total;
-      bar.value = Math.min(done, total);
+      const percent = Math.max(0, Math.min(100, (done / total) * 100));
+      fill.style.width = `${percent}%`;
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.setAttribute("aria-valuenow", String(Math.round(percent)));
       q("run-value").textContent =
-        `${Math.round((done / total) * 100)}% · ${done}/${total}` +
+        `${Math.round(percent)}% · ${done}/${total}` +
         (found === undefined ? "" : ` · найдено ${found}`);
     } else {
-      bar.removeAttribute("value");
+      fill.style.width = "0";
+      bar.removeAttribute("aria-valuenow");
       q("run-value").textContent = found === undefined ? "" : `Найдено ${found}`;
     }
+    bar.setAttribute("aria-valuetext", q("run-value").textContent || label);
   };
   const hideProgress = () => {
     q("run-progress").hidden = true;
+    q("notice").hidden = false;
   };
   const action = async (fn: () => unknown | Promise<unknown>) => {
     try {
@@ -272,7 +282,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшей оценкой глубины не попадут в результат">Минимальная глубина, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Глубина — максимальное удаление точки поверхности, оказавшейся внутри второго замкнутого тела, до его ближайшей поверхности. Это не длина захода элемента вдоль оси.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Числовая погрешность расчёта">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшей оценкой глубины не попадут в результат">Минимальная глубина, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Глубина Hard Clash считается по фактическим пересечениям треугольников и вложенности замкнутых тел. Габариты используются только для быстрого отбора пар.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -317,7 +327,7 @@ export function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="Оценка максимальной глубины поверхности внутри второго тела; не длина захода вдоль оси">${c?.type === "duplicates" ? "Совпадение геометрии" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок пары ещё не создан</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="Максимальная локальная глубина по пересекающимся парам треугольников и вложенным поверхностям">${c?.type === "duplicates" ? "Совпадение геометрии" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -440,11 +450,39 @@ export function mountPanel(
     if (focus) {
       const r = check()?.results.find((x) => x.id === id);
       if (r) {
-        if (r.image && r.imageScope === "pair-ab")
-          host.focus(r, Number(q<HTMLInputElement>("distance").value));
-        else void previewPair(r);
+        host.focus(r, Number(q<HTMLInputElement>("distance").value));
+        schedulePreview(r);
       }
     }
+  }
+  function schedulePreview(r: Clash) {
+    clearTimeout(previewTimer);
+    const token = ++previewToken;
+    if ((r.image && r.imageScope === "pair-ab") || !host.canLocate(r)) return;
+    previewTimer = window.setTimeout(async () => {
+      if (token !== previewToken || busy || selected !== r.id) return;
+      try {
+        const image = await host.snapshot(
+          r,
+          Number(q<HTMLInputElement>("distance").value),
+          () => token !== previewToken || busy || selected !== r.id,
+          true,
+          false,
+        );
+        if (token !== previewToken || selected !== r.id) return;
+        r.image = image;
+        r.imageScope = "pair-ab";
+        mark();
+        if (tab === "results") renderDetail();
+      } catch (error) {
+        if (token === previewToken && selected === r.id)
+          note(
+            "Не удалось создать снимок выбранной коллизии: " +
+              (error instanceof Error ? error.message : String(error)),
+            true,
+          );
+      }
+    }, 500);
   }
   async function previewPair(r: Clash) {
     aborted = false;
@@ -496,6 +534,10 @@ export function mountPanel(
   }
   const setBusy = (value: boolean) => {
     busy = value;
+    if (value) {
+      clearTimeout(previewTimer);
+      previewToken++;
+    }
     for (const id of [
       "new",
       "scan",
@@ -1266,6 +1308,8 @@ export function mountPanel(
   return () => {
     disposeResize();
     clearInterval(contextTimer);
+    clearTimeout(previewTimer);
+    previewToken++;
     aborted = true;
     cancelWorker?.();
     worker?.terminate();

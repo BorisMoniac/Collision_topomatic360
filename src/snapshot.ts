@@ -1,10 +1,6 @@
-/** Capture only canvases that match the active CAD viewport. */
-export async function captureViewport(
-  view: CadViewContext,
-  aborted: () => boolean,
-): Promise<string> {
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  if (aborted()) throw Error("Подготовка снимков отменена.");
+const frame = () =>
+  new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+function viewportCanvases(view: CadViewContext) {
   const { width, height } = view.camera;
   const candidates = Array.from(document.querySelectorAll("canvas")).filter(
     (canvas) => {
@@ -35,6 +31,43 @@ export async function captureViewport(
     throw Error(
       "Открыто несколько подходящих 3D-окон. Оставьте одно окно для снимка.",
     );
+  return { candidates, rect };
+}
+/** Keep the last visible frame above the CAD canvases during pair-only capture. */
+export async function freezeViewport(view: CadViewContext) {
+  await frame();
+  view.repaint();
+  const { candidates, rect } = viewportCanvases(view),
+    cover = document.createElement("canvas");
+  cover.width = Math.max(1, Math.round(rect.width * devicePixelRatio));
+  cover.height = Math.max(1, Math.round(rect.height * devicePixelRatio));
+  Object.assign(cover.style, {
+    position: "fixed",
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    zIndex: "2147483646",
+    pointerEvents: "none",
+  });
+  const dc = cover.getContext("2d")!;
+  for (const canvas of candidates)
+    dc.drawImage(canvas, 0, 0, cover.width, cover.height);
+  document.body.append(cover);
+  return async () => {
+    view.repaint();
+    await frame();
+    cover.remove();
+  };
+}
+/** Capture only canvases that match the active CAD viewport. */
+export async function captureViewport(
+  view: CadViewContext,
+  aborted: () => boolean,
+): Promise<string> {
+  await frame();
+  if (aborted()) throw Error("Подготовка снимков отменена.");
+  const { candidates } = viewportCanvases(view);
   const result = document.createElement("canvas"),
     scale = Math.min(1, 1280 / candidates[0].width);
   result.width = Math.round(candidates[0].width * scale);

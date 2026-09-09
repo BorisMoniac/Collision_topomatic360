@@ -795,10 +795,18 @@ input[type="checkbox"] {
   color: #d9e7d2;
   font-size: 10px;
 }
-.run-progress progress {
+.run-bar {
   width: 100%;
   height: 7px;
-  accent-color: #e3bc43;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #101810;
+}
+.run-bar i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: #e3bc43;
 }
 #run-phase,
 #run-value {

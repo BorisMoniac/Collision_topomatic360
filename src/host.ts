@@ -1,7 +1,7 @@
 import { DwgType } from "albatros/enums";
 import { Clash, GeometryElement, Vec } from "./domain";
 import { bounds } from "./geometry";
-import { captureViewport } from "./snapshot";
+import { captureViewport, freezeViewport } from "./snapshot";
 export interface Snapshot {
   elements: GeometryElement[];
   fingerprint: string;
@@ -85,6 +85,11 @@ export class ModelHost {
   private metadata = new Map<string, GeometryElement>();
   private refs = new Map<string, DwgModel3d[]>();
   private overlay?: { view: CadViewContext; layer: CadViewLayer };
+  private overlaySurfaces: {
+    obj: DwgModel3d;
+    geometry: UuidGeometry3d;
+    color: number;
+  }[] = [];
   private overlayError?: Error;
   private pointView?: CadViewContext;
   private scannedApp?: Application;
@@ -456,6 +461,7 @@ export class ModelHost {
       this.overlay.view.layer.removeLayer(this.overlay.layer);
       this.overlay.view.invalidate();
       this.overlay = undefined;
+      this.overlaySurfaces = [];
     }
     if (this.pointView) {
       const l = this.pointView.annotations.get(markerLayer);
@@ -471,11 +477,13 @@ export class ModelHost {
       throw Error("Дистанция камеры должна быть не менее 0,5 м.");
     if (!this.refs.has(clash.a.id) || !this.refs.has(clash.b.id))
       throw Error("Один из элементов отсутствует в загруженных моделях.");
-    this.select([clash.a.id, clash.b.id]);
-    this.highlight(clash);
     const p = clash.point,
       v = this.view!;
     if (v.camera?.id !== "3d") v.setCameraType("3d");
+    // Stop the previous flight before starting the next one. Queued camera
+    // animations make rapid arrow navigation oscillate and flash.
+    v.pauseAnimation?.();
+    this.highlight(clash);
     const dir: Vec = [-0.65, 0.65, -0.394];
     const len = Math.hypot(...dir);
     dir.forEach((x, i) => (dir[i] = x / len));
@@ -489,16 +497,17 @@ export class ModelHost {
   }
   private highlight(clash: Clash) {
     this.overlayError = undefined;
-    if (this.overlay) {
+    const view = this.view!;
+    if (this.overlay && this.overlay.view !== view) {
       this.overlay.view.layer.removeLayer(this.overlay.layer);
       this.overlay = undefined;
+      this.overlaySurfaces = [];
     }
-    const view = this.view!,
-      sides = [
+    const sides = [
         { id: clash.a.id, color: 0xff3636ff },
         { id: clash.b.id, color: 0x368bffff },
       ];
-    const surfaces = sides.flatMap(({ id, color }, side) =>
+    this.overlaySurfaces = sides.flatMap(({ id, color }, side) =>
       [...new Set(this.refs.get(id) || [])].flatMap((obj) =>
         Object.values(obj.meshes).flatMap((mesh) => {
           const source = mesh.geometry;
@@ -516,12 +525,18 @@ export class ModelHost {
         }),
       ),
     );
+    if (this.overlay) {
+      this.overlay.layer.visible = true;
+      view.invalidate(true);
+      return;
+    }
+    let layer: CadViewLayer;
     const paint = (dc: DeviceContext) => {
       const old = dc.color,
         material = dc.rasterizer.material;
       dc.rasterizer.material = undefined;
       try {
-        for (const { obj, geometry, color } of surfaces) {
+        for (const { obj, geometry, color } of this.overlaySurfaces) {
           dc.color = color;
           dc.pushMatrix();
           try {
@@ -543,7 +558,7 @@ export class ModelHost {
         dc.rasterizer.material = material;
       }
     };
-    const layer: CadViewLayer = {
+    layer = {
       id: overlayId,
       order: 10000,
       visible: true,
@@ -574,10 +589,11 @@ export class ModelHost {
     distance: number,
     aborted: () => boolean,
     current = false,
+    wide = true,
   ): Promise<string> {
-    return this.captureWorkspace(() =>
-      this.snapshotInWorkspace(clash, distance, aborted, current),
-    );
+    const task = () =>
+      this.snapshotInWorkspace(clash, distance, aborted, current);
+    return wide ? this.captureWorkspace(task) : task();
   }
   private async snapshotInWorkspace(
     clash: Clash,
@@ -598,10 +614,12 @@ export class ModelHost {
     const drawingVisible = drawing.visible,
       annotationsVisible = view.annotations.visible,
       previousSelection = new Set(view.layer.selectedObjects());
+    let unfreeze: (() => Promise<void>) | undefined;
     try {
       if (!current) this.focus(clash, distance, false);
       else this.highlight(clash);
       view.pauseAnimation();
+      unfreeze = await freezeViewport(view);
       view.layer.clearSelected();
       // Keep the pair overlay, hide the source drawing and all issue markers.
       drawing.visible = false;
@@ -619,6 +637,7 @@ export class ModelHost {
       view.layer.clearSelected();
       view.layer.selectObjects((obj) => previousSelection.has(obj), true);
       view.invalidate();
+      await unfreeze?.();
     }
   }
   markers(
