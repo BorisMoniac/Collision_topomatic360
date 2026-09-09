@@ -531,6 +531,9 @@ export class ModelHost {
     // animations make rapid arrow navigation oscillate and flash.
     v.pauseAnimation?.();
     this.highlight(clash);
+    // The host selection must hold both sides so the object tree, properties
+    // and any standard command see the whole conflict, not one element.
+    this.select([clash.a.id, clash.b.id]);
     const dir: Vec = [-0.65, 0.65, -0.394];
     const len = Math.hypot(...dir);
     dir.forEach((x, i) => (dir[i] = x / len));

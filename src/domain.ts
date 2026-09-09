@@ -63,6 +63,8 @@ export interface Clash {
   lastSeen: string;
   image?: string;
   imageScope?: "pair" | "pair-ab";
+  /** Camera distance the stored image was framed at, in metres. */
+  imageDistance?: number;
   penetrationMm?: number;
 }
 export interface Check {
@@ -324,6 +326,11 @@ export function readProject(text: string): Project {
         r.imageScope !== "pair-ab"
       )
         throw Error("Некорректный состав снимка результата.");
+      if (
+        r?.imageDistance !== undefined &&
+        (!Number.isFinite(r.imageDistance) || r.imageDistance < 0.5)
+      )
+        throw Error("Некорректная дистанция снимка результата.");
       if (
         !r ||
         typeof r.id !== "string" ||

@@ -528,20 +528,28 @@ export function mountPanel(
   function schedulePreview(r: Clash) {
     clearTimeout(previewTimer);
     const token = ++previewToken;
-    if ((r.image && r.imageScope === "pair-ab") || !host.canLocate(r)) return;
+    const distance = Number(q<HTMLInputElement>("distance").value);
+    if (
+      (r.image && r.imageScope === "pair-ab" && r.imageDistance === distance) ||
+      !host.canLocate(r)
+    )
+      return;
     previewTimer = window.setTimeout(async () => {
       if (token !== previewToken || busy || selected !== r.id) return;
       try {
+        // Frame from the approach camera, not from wherever the flight to the
+        // conflict happens to be after half a second.
         const image = await host.snapshot(
           r,
-          Number(q<HTMLInputElement>("distance").value),
+          distance,
           () => token !== previewToken || busy || selected !== r.id,
-          true,
+          false,
           false,
         );
         if (token !== previewToken || selected !== r.id) return;
         r.image = image;
         r.imageScope = "pair-ab";
+        r.imageDistance = distance;
         mark();
         if (tab === "results") renderDetail();
       } catch (error) {
@@ -559,12 +567,10 @@ export function mountPanel(
     setBusy(true);
     showProgress("Создание снимка пары");
     try {
-      r.image = await host.snapshot(
-        r,
-        Number(q<HTMLInputElement>("distance").value),
-        () => aborted,
-      );
+      const distance = Number(q<HTMLInputElement>("distance").value);
+      r.image = await host.snapshot(r, distance, () => aborted);
       r.imageScope = "pair-ab";
+      r.imageDistance = distance;
       mark();
       if (tab === "results" && selected === r.id) renderDetail();
     } catch (error) {
@@ -1230,6 +1236,8 @@ export function mountPanel(
               true,
             );
             r.imageScope = "pair-ab";
+            // Framed by hand from the current viewpoint: the report must keep it.
+            r.imageDistance = undefined;
             mark();
             renderDetail();
             note("Снимок сохранён в результат.");
@@ -1275,7 +1283,8 @@ export function mountPanel(
         if (!rows.length) throw Error("Нет результатов для отчёта.");
         if (q<HTMLInputElement>("report-images").checked) {
           const view = host.view,
-            previous = view?.storeView();
+            previous = view?.storeView(),
+            distance = Number(q<HTMLInputElement>("distance").value);
           aborted = false;
           setBusy(true);
           showProgress("Подготовка снимков отчёта", 0, rows.length);
@@ -1293,18 +1302,22 @@ export function mountPanel(
                   rows.length,
                 );
                 note("Подготовка снимков: " + (i + 1) + " / " + rows.length);
-                if (!row.image || row.imageScope !== "pair-ab") {
+                // A shot framed at another approach distance is re-taken so the
+                // whole report matches the current camera setting. A hand-framed
+                // pair shot carries no distance and is kept as it is.
+                const stale =
+                  row.imageScope !== "pair-ab" ||
+                  (row.imageDistance !== undefined &&
+                    row.imageDistance !== distance);
+                if (!row.image || stale) {
                   if (row.state === "resolved" && !host.canLocate(row)) {
                     i++;
                     continue;
                   }
                   try {
-                    row.image = await host.snapshot(
-                      row,
-                      Number(q<HTMLInputElement>("distance").value),
-                      () => aborted,
-                    );
+                    row.image = await host.snapshot(row, distance, () => aborted);
                     row.imageScope = "pair-ab";
+                    row.imageDistance = distance;
                     mark();
                   } catch (error) {
                     if (aborted || !host.isCurrent()) throw error;
@@ -1320,11 +1333,7 @@ export function mountPanel(
               const r = c.results.find((r) => r.id === selected);
               if (r)
                 try {
-                  host.focus(
-                    r,
-                    Number(q<HTMLInputElement>("distance").value),
-                    false,
-                  );
+                  host.focus(r, distance, false);
                 } catch {}
               if (previous) view.restoreView(previous);
             }
