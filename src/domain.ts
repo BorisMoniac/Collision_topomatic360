@@ -66,6 +66,8 @@ export interface Clash {
   /** Camera distance the stored image was framed at, in metres. */
   imageDistance?: number;
   penetrationMm?: number;
+  /** The geometry gave no volume to measure, so the depth says nothing. */
+  unmeasured?: boolean;
 }
 export interface Check {
   id: string;
@@ -331,6 +333,8 @@ export function readProject(text: string): Project {
         (!Number.isFinite(r.imageDistance) || r.imageDistance < 0.5)
       )
         throw Error("Некорректная дистанция снимка результата.");
+      if (r?.unmeasured !== undefined && typeof r.unmeasured !== "boolean")
+        throw Error("Некорректный признак измеримости результата.");
       if (
         !r ||
         typeof r.id !== "string" ||

@@ -222,7 +222,9 @@ export function mountPanel(
     return (c?.results || []).filter(
       (r) =>
         (!state || r.state === state) &&
-        (c?.type === "duplicates" || (r.penetrationMm ?? 0) >= minDepth) &&
+        (c?.type === "duplicates" ||
+          r.unmeasured ||
+          (r.penetrationMm ?? 0) >= minDepth) &&
         (!search ||
           JSON.stringify({ ...r, image: undefined })
             .toLowerCase()
@@ -305,6 +307,12 @@ export function mountPanel(
         `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать HTML-отчёт</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
+  const depthText = (r: Clash, type: Check["type"]) =>
+    type === "duplicates"
+      ? "—"
+      : r.unmeasured
+        ? "не определена"
+        : (r.penetrationMm ?? 0).toFixed(1);
   function renderTable() {
     const c = check()!,
       rows = resultRows(),
@@ -312,7 +320,7 @@ export function mountPanel(
     page = Math.max(0, Math.min(page, pages - 1));
     const visible = rows.slice(page * 50, page * 50 + 50);
     q("table").innerHTML = rows.length
-      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Глубина, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], c.type === "duplicates" ? "—" : (r.penetrationMm ?? 0).toFixed(1), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Глубина, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], depthText(r, c.type), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : '<div class="empty">Нет результатов. Запустите проверку или измените фильтры.</div>';
     q("page").textContent =
       `${page + 1} / ${pages}`;
@@ -327,7 +335,7 @@ export function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="Наименьшая толщина области перекрытия двух элементов">${c?.type === "duplicates" ? "Совпадение геометрии" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${r.unmeasured ? "У элемента нет собственной толщины, объёмный замер невозможен" : "Наименьшая толщина области перекрытия двух элементов"}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.unmeasured ? "Глубина не определена" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
