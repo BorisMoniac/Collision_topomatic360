@@ -223,9 +223,10 @@ export function mountPanel(
       (r) =>
         (!state || r.state === state) &&
         (c?.type === "duplicates" ||
-          r.unmeasured ||
-          // Same allowance as the calculation itself, so one number typed in
-          // three places always selects the same conflicts.
+          // A depth that is not a plain measurement is left to a person, so no
+          // threshold hides it. Otherwise the same allowance as the calculation
+          // itself, so one number typed in three places selects the same rows.
+          (r.depth !== undefined && r.kind !== "touch") ||
           (r.penetrationMm ?? 0) + (c?.precision ?? 0) >= minDepth) &&
         (!search ||
           JSON.stringify({ ...r, image: undefined })
@@ -309,12 +310,31 @@ export function mountPanel(
         `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать HTML-отчёт</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
+  const depthWords: Record<NonNullable<Clash["depth"]>, string> = {
+    unmeasurable: "не определена",
+    tolerance: "в пределах точности",
+    approximate: "неполный расчёт",
+  };
   const depthText = (r: Clash, type: Check["type"]) =>
     type === "duplicates"
       ? "—"
-      : r.unmeasured
-        ? "не определена"
-        : (r.penetrationMm ?? 0).toFixed(1);
+      : r.kind === "touch"
+        ? "касание"
+        : r.depth === "approximate"
+          ? `≈ ${(r.penetrationMm ?? 0).toFixed(1)}`
+          : r.depth
+            ? depthWords[r.depth]
+            : (r.penetrationMm ?? 0).toFixed(1);
+  const depthTitle = (r: Clash) =>
+    r.kind === "touch"
+      ? "Тела соприкасаются, общего объёма нет"
+      : r.depth === "unmeasurable"
+        ? "У элемента нет собственного объёма, замер глубины к нему неприменим"
+        : r.depth === "tolerance"
+          ? "Перекрытие тоньше заданной точности расчёта"
+          : r.depth === "approximate"
+            ? "Контакт разделён не полностью, значение может быть завышено"
+            : "Наименьшая толщина области перекрытия двух элементов";
   function renderTable() {
     const c = check()!,
       rows = resultRows(),
@@ -337,7 +357,7 @@ export function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${r.unmeasured ? "У элемента нет собственной толщины, объёмный замер невозможен" : "Наименьшая толщина области перекрытия двух элементов"}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.unmeasured ? "Глубина не определена" : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${e(depthTitle(r))}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.kind === "touch" ? "Касание" : r.depth ? depthWords[r.depth] : `Глубина ${(r.penetrationMm ?? 0).toFixed(1)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(

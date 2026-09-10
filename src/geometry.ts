@@ -373,7 +373,7 @@ function contactZones(
   window: Box,
   eps: number,
   empty: (n: Vec, at: number, anchors: Vec[]) => boolean,
-): { hits: Vec[]; limits: Limit[] }[] {
+): { zones: { hits: Vec[]; limits: Limit[] }[]; crowded: boolean } {
   const middle = window.min.map((v, k) => (v + window.max[k]) / 2) as Vec,
     diagonal = norm(sub(window.max, window.min)),
     least = Math.max(eps * 10, diagonal / 50);
@@ -382,53 +382,116 @@ function contactZones(
       (k) => list.reduce((sum, h) => sum + h[k], 0) / list.length,
     ) as Vec;
   let zones = [{ hits, limits: [] as Limit[] }];
-  for (let pass = 0; pass < 3; pass++) {
+  let crowded = false;
+  for (let pass = 0; pass < 12; pass++) {
     const next: typeof zones = [];
     let cut = false;
     for (const zone of zones) {
-      if (zone.hits.length < 2 || next.length + zones.length >= 8) {
+      if (zone.hits.length < 2) {
+        next.push(zone);
+        continue;
+      }
+      // Out of room. The contact may still hold separate places, so the caller
+      // has to be told the split is unfinished rather than shown a number.
+      if (next.length + zones.length >= 64) {
+        crowded = true;
         next.push(zone);
         continue;
       }
       const centre = centreOf(zone.hits),
+        // Asking at one point is not asking. A gap inside a single contact is
+        // empty seen from the middle of the pair and solid seen from the
+        // contact itself, and the contact is the one that knows.
+        anchors: Vec[] = [
+          centre,
+          middle,
+          ...[0, 0.25, 0.5, 0.75].map(
+            (part) => zone.hits[Math.floor(part * (zone.hits.length - 1))],
+          ),
+        ],
         directions: Vec[] = [
           [1, 0, 0],
           [0, 1, 0],
           [0, 0, 1],
         ],
-        main = eigenAxes(zone.hits, centre)[0];
-      if (main) directions.push(main);
-      let best: { n: Vec; at: number; size: number } | undefined;
-      for (const n of directions) {
-        const values = zone.hits.map((h) => dot(h, n)).sort((a, b) => a - b);
+        frame = eigenAxes(zone.hits, centre);
+      if (frame[0]) directions.push(frame[0]);
+      // How wide the contact is across a direction. A gap narrower than that is
+      // spacing between the points of one contact, not a way out of it, and
+      // cutting there would leave a fragment that measures its own size.
+      const reach = (n: Vec) => {
+        let high = -Infinity,
+          low = Infinity;
+        for (const h of zone.hits) {
+          const d = dot(h, n);
+          if (d > high) high = d;
+          if (d < low) low = d;
+        }
+        return high - low;
+      };
+      const across = (n: Vec) =>
+        Math.max(
+          0,
+          ...frame
+            .filter((e) => Math.abs(dot(e, n)) < 0.9)
+            .map((e) => reach(e)),
+        );
+      // Every gap the direction offers is examined, not only the widest. A pair
+      // crossing nine walls parts into nine places at once instead of peeling
+      // one off per pass and running out of passes with walls still together.
+      const spread = (n: Vec) => {
+        const values = zone.hits.map((h) => dot(h, n)).sort((a, b) => a - b),
+          gaps: { at: number; size: number }[] = [];
         for (let i = 1; i < values.length; i++) {
           const size = values[i] - values[i - 1];
-          if (size > least && (!best || size > best.size))
-            best = { n, at: (values[i] + values[i - 1]) / 2, size };
+          if (size > least)
+            gaps.push({ at: (values[i] + values[i - 1]) / 2, size });
         }
+        return gaps.sort((p, q) => q.size - p.size);
+      };
+      // One cut per pass, at the widest gap any direction offers. Splitting on
+      // several at once fragments a single contact, and a fragment measures the
+      // contact's own size rather than its depth.
+      let chosen: { n: Vec; cuts: number[] } | undefined,
+        widest = 0;
+      for (const n of directions) {
+        const gaps = spread(n);
+        if (!gaps.length || gaps[0].size <= widest) continue;
+        if (gaps[0].size <= across(n)) continue;
+        widest = gaps[0].size;
+        if (empty(n, gaps[0].at, anchors)) chosen = { n, cuts: [gaps[0].at] };
       }
-      if (!best || !empty(best.n, best.at, [middle, centre])) {
+      if (!chosen) {
         next.push(zone);
         continue;
       }
       cut = true;
-      const low: Vec[] = [],
-        high: Vec[] = [];
-      for (const h of zone.hits)
-        (dot(h, best.n) < best.at ? low : high).push(h);
-      next.push({
-        hits: low,
-        limits: [...zone.limits, { n: best.n, from: -Infinity, to: best.at }],
-      });
-      next.push({
-        hits: high,
-        limits: [...zone.limits, { n: best.n, from: best.at, to: Infinity }],
-      });
+      const { n, cuts } = chosen,
+        parts: Vec[][] = Array.from({ length: cuts.length + 1 }, () => []);
+      for (const h of zone.hits) {
+        const d = dot(h, n);
+        let slot = 0;
+        while (slot < cuts.length && d >= cuts[slot]) slot++;
+        parts[slot].push(h);
+      }
+      parts.forEach((part, index) =>
+        next.push({
+          hits: part,
+          limits: [
+            ...zone.limits,
+            {
+              n,
+              from: index ? cuts[index - 1] : -Infinity,
+              to: index < cuts.length ? cuts[index] : Infinity,
+            },
+          ],
+        }),
+      );
     }
     zones = next;
     if (!cut) break;
   }
-  return zones;
+  return { zones, crowded };
 }
 /** Whether a triangle reaches the part of the contact a zone stands for. */
 function withinLimits(e: GeometryElement, i: number, limits: Limit[]): boolean {
@@ -473,9 +536,33 @@ function overlapThickness(
   axes: Vec[],
   window: Box,
   centre: Vec,
+  hits: Vec[],
   eps: number,
   probe: (side: 0 | 1, p: Vec) => boolean,
-): number {
+): { width: number; thin: boolean } {
+  // What the contact itself spans along a direction: the points where the
+  // surfaces cross, plus the corners of one body that sit inside the other.
+  // Slower than reading the shadows, so it is kept for the directions where the
+  // shadows come back empty and the answer would otherwise be the contact's own
+  // width rather than its depth.
+  const spanned = (n: Vec) => {
+    let high = -Infinity,
+      low = Infinity;
+    const note = (d: number) => {
+      if (d > high) high = d;
+      if (d < low) low = d;
+    };
+    for (const h of hits) note(dot(h, n));
+    for (const [e, ids, other] of [
+      [x, xIds, 1],
+      [y, yIds, 0],
+    ] as [GeometryElement, number[], 0 | 1][]) {
+      const step = Math.max(1, Math.floor(ids.length / 32));
+      for (let i = 0; i < ids.length; i += step)
+        for (const p of tri(e, ids[i])) if (probe(other, p)) note(dot(p, n));
+    }
+    return Number.isFinite(high) && Number.isFinite(low) ? high - low : 0;
+  };
   const windowSpan = (n: Vec) => {
     let low = Infinity,
       high = -Infinity;
@@ -523,7 +610,8 @@ function overlapThickness(
   // three world axes alone still bound the answer from above.
   // A shared box with no extent of its own settles the matter: the bodies meet
   // over nothing. That is a touch, or geometry too flat to hold a volume.
-  if (window.min.some((v, k) => window.max[k] - v <= 0)) return 0;
+  if (window.min.some((v, k) => window.max[k] - v <= 0))
+    return { width: 0, thin: false };
   // Weighing every direction over a huge contact is not worth the wait. The set
   // is thinned by an even step rather than cut short, so what survives still
   // points all over instead of all one way.
@@ -556,6 +644,7 @@ function overlapThickness(
     a && b ? Math.min(a[1], b[1]) - Math.max(a[0], b[0]) : 0;
   let best = Infinity,
     measured = false,
+    thin = false,
     rescues = 0;
   for (let index = 0; index < list.length; index++) {
     const n = list[index],
@@ -567,12 +656,28 @@ function overlapThickness(
       run = span(filled(0, a, n, from, to), filled(1, b, n, from, to));
     // A direction whose surfaces still say nothing is unusable, not an answer,
     // and neither is one that answers below the tolerance the whole calculation
-    // is run at. Only when every direction stays silent is the contact flat.
-    if (run <= eps) continue;
+    // is run at. But when the contact's own directions come out that small, the
+    // overlap really is thinner than this calculation can resolve, and the wide
+    // directions left over would report the size of the contact as its depth.
+    if (run <= eps) {
+      // A direction the contact itself pointed at is worth a second look before
+      // it is given up on.
+      if (index < lead.length && rescues < 40) {
+        rescues++;
+        run = spanned(n);
+      }
+      if (run <= eps) {
+        if (index < lead.length) thin = true;
+        continue;
+      }
+    }
     measured = true;
     if (run < best) best = run;
   }
-  return measured && Number.isFinite(best) ? best : 0;
+  return {
+    width: measured && Number.isFinite(best) ? best : 0,
+    thin,
+  };
 }
 /**
  * Whether a mesh encloses anything at all. A sheet, a single face or a folded
@@ -626,9 +731,11 @@ function onSurface(p: Vec, e: GeometryElement, tree: Node, eps: number) {
   return false;
 }
 function inside(p: Vec, e: GeometryElement, tree: Node, eps: number): boolean {
+  // Only points outside the box are refused here. Shrinking the box by the
+  // tolerance instead would call the whole of a thin overlap outside the body.
   if (
     !e.closed ||
-    p.some((v, k) => v <= e.bounds.min[k] + eps || v >= e.bounds.max[k] - eps)
+    p.some((v, k) => v < e.bounds.min[k] - eps || v > e.bounds.max[k] + eps)
   )
     return false;
   if (onSurface(p, e, tree, eps)) return false;
@@ -815,7 +922,7 @@ export async function calculate(
       let point: Vec | undefined,
         kind: Clash["kind"] = "surface",
         penetrationMm = 0,
-        unmeasured = false;
+        depthState: Clash["depth"];
       if (check.type === "duplicates") {
         if (
           triangleCount(x) !== triangleCount(y) ||
@@ -960,10 +1067,49 @@ export async function calculate(
               const p = add(anchor, n, at - dot(anchor, n));
               return !solid(0, p) || !solid(1, p);
             });
-          const zones = contactZones(hits, window, eps, empty),
+          // Whether the pair shares any space at all, asked before anything is
+          // measured. Two bodies that only meet over a face have nothing to
+          // measure, and a width taken across that face is not a depth.
+          // Whether the pair shares space or only meets over a surface. A
+          // contact lying in one plane is a touch when the bodies do not reach
+          // across that plane, and a width measured across such a contact would
+          // be its size rather than a depth. The reach is read the same way any
+          // depth is, because a cloud of contact points alone can lie flat even
+          // where the bodies plainly overlap.
+          const centreOfHits = () =>
+            [0, 1, 2].map(
+              (k) => hits.reduce((sum, h) => sum + h[k], 0) / hits.length,
+            ) as Vec;
+          const flat =
+            kind === "surface" && hits.length > 2
+              ? eigenAxes(hits, centreOfHits())[2]
+              : undefined;
+          const holds =
+            !flat ||
+            overlapThickness(
+              x,
+              y,
+              baseX,
+              baseY,
+              [flat],
+              [],
+              window,
+              centreOfHits(),
+              hits,
+              eps,
+              probe,
+            ).width > eps;
+          const hollowPair = hollow(x) || hollow(y);
+          // The bodies meet over a surface and share no space behind it. There
+          // is nothing to measure, and a width taken across that surface would
+          // read as a deep conflict.
+          if (!hollowPair && !holds) kind = "touch";
+          if (kind === "touch" && !check.touching) continue;
+          const { zones, crowded } = contactZones(hits, window, eps, empty),
             list = axes.values();
-          let thickness = 0;
-          for (const zone of zones) {
+          let thickness = 0,
+            resolved = true;
+          for (const zone of kind === "touch" ? [] : zones) {
             const xIds = zone.limits.length
                 ? baseX.filter((i) => withinLimits(x, i, zone.limits))
                 : baseX,
@@ -980,7 +1126,7 @@ export async function calculate(
             // Directions the contact itself supplies come first: a loop of
             // contacts lies in a plane, and its normal is the way the bodies
             // press together. Face normals only sharpen what those give.
-            const deep = overlapThickness(
+            const measurement = overlapThickness(
               x,
               y,
               xIds,
@@ -989,29 +1135,34 @@ export async function calculate(
               list,
               window,
               anchor,
+              zone.hits,
               eps,
               probe,
             );
-            if (deep > thickness) thickness = deep;
+            if (measurement.thin) resolved = false;
+            if (measurement.width > thickness) thickness = measurement.width;
             await checkpoint();
           }
           thickness *= 1000;
           // A body that encloses nothing can never give a volumetric reading.
-          // Its clash is real all the same, so only bodies that do hold a
-          // volume are allowed to fall out of the result as a touch.
-          if (hollow(x) || hollow(y)) unmeasured = true;
-          else if (thickness <= 0 && !check.touching) continue;
-          penetrationMm = unmeasured
-            ? 0
-            : check.touching
-              ? thickness
+          // Its clash is real all the same and stays in the result.
+          if (kind === "touch") depthState = undefined;
+          else if (hollowPair) depthState = "unmeasurable";
+          // The bodies do share space, so a direction that answered nothing
+          // was unusable rather than right. Saying so beats inventing a number.
+          else if (thickness <= 0 || !resolved) depthState = "tolerance";
+          else if (crowded) depthState = "approximate";
+          penetrationMm =
+            kind === "touch" || depthState === "unmeasurable" || depthState === "tolerance"
+              ? 0
               : Math.max(check.precision, thickness);
           await checkpoint();
         }
-        // An unmeasured conflict must never disappear behind a depth filter.
+        // A conflict whose depth is not a plain measurement must never vanish
+        // behind a depth filter: a person decides on those.
         if (
           point &&
-          !unmeasured &&
+          !depthState &&
           penetrationMm + check.precision < check.minPenetration
         )
           continue;
@@ -1029,7 +1180,7 @@ export async function calculate(
           firstSeen: "",
           lastSeen: "",
           penetrationMm,
-          ...(unmeasured ? { unmeasured: true } : {}),
+          ...(depthState ? { depth: depthState } : {}),
         });
         if (found.length >= 50000)
           throw Error(

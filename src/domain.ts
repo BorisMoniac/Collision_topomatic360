@@ -55,7 +55,7 @@ export interface Clash {
   a: ElementInfo;
   b: ElementInfo;
   point: Vec;
-  kind: "surface" | "contained" | "duplicate";
+  kind: "surface" | "contained" | "duplicate" | "touch";
   state: State;
   note: string;
   assignee: string;
@@ -66,7 +66,15 @@ export interface Clash {
   /** Camera distance the stored image was framed at, in metres. */
   imageDistance?: number;
   penetrationMm?: number;
-  /** The geometry gave no volume to measure, so the depth says nothing. */
+  /**
+   * How far the depth can be trusted. Absent means an ordinary measurement.
+   * "tolerance": the bodies overlap by less than the calculation resolves.
+   * "approximate": the contact holds more separate places than were separated,
+   * so the number can be larger than any single one of them.
+   * "unmeasurable": the geometry bounds no volume, so depth does not apply.
+   */
+  depth?: "tolerance" | "approximate" | "unmeasurable";
+  /** Read from files written before depth states existed. */
   unmeasured?: boolean;
 }
 export interface Check {
@@ -335,6 +343,12 @@ export function readProject(text: string): Project {
         throw Error("Некорректная дистанция снимка результата.");
       if (r?.unmeasured !== undefined && typeof r.unmeasured !== "boolean")
         throw Error("Некорректный признак измеримости результата.");
+      if (
+        r?.depth !== undefined &&
+        !["tolerance", "approximate", "unmeasurable"].includes(r.depth)
+      )
+        throw Error("Некорректная достоверность глубины результата.");
+      if (r?.unmeasured && !r.depth) r.depth = "unmeasurable";
       if (
         !r ||
         typeof r.id !== "string" ||
