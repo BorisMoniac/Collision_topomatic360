@@ -236,22 +236,103 @@ export function trianglesIntersect(
   }
 }
 /**
- * Local triangle-pair penetration used by normal Hard Clash methods.
- * For each triangle plane, move the other triangle to the nearer side of the
- * plane. The smaller of the two face-normal translations is the pair depth.
- * Unlike an AABB overlap, this value follows the actual triangle orientation.
+ * Directions worth measuring a contact along: the face normals of the triangles
+ * that meet. Opposite normals describe the same direction, so each is folded
+ * into one half-space and rounded before it is stored.
  */
-function trianglePairPenetration(a: Vec[], b: Vec[]): number {
-  const alongPlane = (plane: Vec[], moving: Vec[]) => {
-    const n = unit(cross(sub(plane[1], plane[0]), sub(plane[2], plane[0])));
-    if (!n) return Infinity;
-    const distances = moving.map((p) => dot(sub(p, plane[0]), n));
-    const min = Math.min(...distances),
-      max = Math.max(...distances);
-    if (!(min < 0 && max > 0)) return 0;
-    return Math.min(-min, max);
+class ContactAxes {
+  // The shared box bounds the contact along X, Y and Z whatever the shapes are,
+  // so those three directions are always worth measuring.
+  private items = new Map<string, Vec>([
+    ["10000,0,0", [1, 0, 0]],
+    ["0,10000,0", [0, 1, 0]],
+    ["0,0,10000", [0, 0, 1]],
+  ]);
+  add(t: Vec[]) {
+    if (this.items.size >= 256) return;
+    const n = unit(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+    if (!n) return;
+    const flip =
+      n[0] < -1e-9 ||
+      (Math.abs(n[0]) <= 1e-9 &&
+        (n[1] < -1e-9 || (Math.abs(n[1]) <= 1e-9 && n[2] < 0)));
+    const u: Vec = flip ? [-n[0], -n[1], -n[2]] : [n[0], n[1], n[2]];
+    this.items.set(u.map((v) => Math.round(v * 1e4)).join(","), u);
+  }
+  addFrom(e: GeometryElement, ids: number[]) {
+    for (const i of ids) this.add(tri(e, i));
+  }
+  values() {
+    return [...this.items.values()];
+  }
+}
+/**
+ * Hard Clash depth as the thinnest extent of the contact region.
+ *
+ * Along every candidate direction both bodies cast a shadow; the length the two
+ * shadows share is how far one body reaches into the other along that
+ * direction, and the smallest of those lengths is the depth. Only geometry that
+ * reaches into the contact window is projected, and every projection is clipped
+ * to that window, so a distant part of a composite element cannot inflate the
+ * value and an oversized triangle cannot either.
+ *
+ * This is the overlap of the two bodies, not the translation that frees them:
+ * pulling a bar out of a slab takes the whole length of the bar, which says
+ * nothing about how serious the clash is.
+ */
+function overlapThickness(
+  x: GeometryElement,
+  y: GeometryElement,
+  xIds: number[],
+  yIds: number[],
+  axes: Vec[],
+  window: Box,
+): number {
+  const windowSpan = (n: Vec) => {
+    let low = Infinity,
+      high = -Infinity;
+    for (let corner = 0; corner < 8; corner++) {
+      const d =
+        (corner & 1 ? window.max[0] : window.min[0]) * n[0] +
+        (corner & 2 ? window.max[1] : window.min[1]) * n[1] +
+        (corner & 4 ? window.max[2] : window.min[2]) * n[2];
+      if (d < low) low = d;
+      if (d > high) high = d;
+    }
+    return [low, high];
   };
-  return Math.min(alongPlane(a, b), alongPlane(b, a));
+  const shadow = (
+    e: GeometryElement,
+    ids: number[],
+    n: Vec,
+    low: number,
+    high: number,
+  ) => {
+    let min = Infinity,
+      max = -Infinity;
+    for (const i of ids)
+      for (let j = 0; j < 9; j += 3) {
+        const d =
+          coordinate(e, i, j) * n[0] +
+          coordinate(e, i, j + 1) * n[1] +
+          coordinate(e, i, j + 2) * n[2];
+        const clipped = d < low ? low : d > high ? high : d;
+        if (clipped < min) min = clipped;
+        if (clipped > max) max = clipped;
+      }
+    // Nothing of this body reaches the window: the window itself is the bound.
+    return min === Infinity ? [low, high] : [min, max];
+  };
+  let best = Infinity;
+  for (const n of axes) {
+    const [low, high] = windowSpan(n),
+      a = shadow(x, xIds, n, low, high),
+      b = shadow(y, yIds, n, low, high),
+      thickness = Math.min(a[1], b[1]) - Math.max(a[0], b[0]);
+    if (thickness <= 0) return 0;
+    if (thickness < best) best = thickness;
+  }
+  return Number.isFinite(best) ? best : 0;
 }
 function pointOnTriangle(p: Vec, t: Vec[], eps: number): boolean {
   const u = sub(t[1], t[0]),
@@ -301,106 +382,6 @@ function inside(p: Vec, e: GeometryElement, tree: Node, eps: number): boolean {
       last = d;
     }
   return n % 2 === 1;
-}
-function boxDistance(p: Vec, box: Box): number {
-  return Math.hypot(
-    ...p.map((v, k) => Math.max(box.min[k] - v, 0, v - box.max[k])),
-  );
-}
-function pointTriangleDistance(p: Vec, t: Vec[]): number {
-  const ab = sub(t[1], t[0]),
-    ac = sub(t[2], t[0]),
-    ap = sub(p, t[0]);
-  const d1 = dot(ab, ap),
-    d2 = dot(ac, ap);
-  if (d1 <= 0 && d2 <= 0) return norm(ap);
-  const bp = sub(p, t[1]),
-    d3 = dot(ab, bp),
-    d4 = dot(ac, bp);
-  if (d3 >= 0 && d4 <= d3) return norm(bp);
-  const vc = d1 * d4 - d3 * d2;
-  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
-    const v = d1 / (d1 - d3);
-    return norm(sub(p, add(t[0], ab, v)));
-  }
-  const cp = sub(p, t[2]),
-    d5 = dot(ab, cp),
-    d6 = dot(ac, cp);
-  if (d6 >= 0 && d5 <= d6) return norm(cp);
-  const vb = d5 * d2 - d1 * d6;
-  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
-    const w = d2 / (d2 - d6);
-    return norm(sub(p, add(t[0], ac, w)));
-  }
-  const va = d3 * d6 - d5 * d4;
-  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
-    const edge = sub(t[2], t[1]),
-      w = (d4 - d3) / (d4 - d3 + (d5 - d6));
-    return norm(sub(p, add(t[1], edge, w)));
-  }
-  const n = cross(ab, ac);
-  return Math.abs(dot(ap, n)) / Math.max(norm(n), 1e-30);
-}
-function nearestSurface(p: Vec, e: GeometryElement, tree: Node): number {
-  let best = Infinity;
-  const visit = (node: Node) => {
-    if (boxDistance(p, node) >= best) return;
-    if (node.ids) {
-      for (const id of node.ids)
-        best = Math.min(best, pointTriangleDistance(p, tri(e, id)));
-      return;
-    }
-    const left = node.left!,
-      right = node.right!;
-    if (boxDistance(p, left) < boxDistance(p, right)) {
-      visit(left);
-      visit(right);
-    } else {
-      visit(right);
-      visit(left);
-    }
-  };
-  visit(tree);
-  return best;
-}
-async function penetrationEstimate(
-  x: GeometryElement,
-  y: GeometryElement,
-  xt: Node,
-  yt: Node,
-  point: Vec,
-  triangleDepth: number,
-  eps: number,
-  checkpoint: () => Promise<void>,
-): Promise<number> {
-  let depth = triangleDepth;
-  const measure = (p: Vec, other: GeometryElement, tree: Node) => {
-    if (inside(p, other, tree, eps))
-      depth = Math.max(depth, nearestSurface(p, other, tree));
-  };
-  measure(point, x, xt);
-  measure(point, y, yt);
-  let sampled = 0;
-  for (const [first, other, tree] of [
-    [x, y, yt],
-    [y, x, xt],
-  ] as const) {
-    const count = triangleCount(first),
-      step = Math.max(1, Math.floor(count / 1024));
-    for (let i = 0; i < count; i += step) {
-      const t = tri(first, i),
-        center = t[0].map((_, k) => (t[0][k] + t[1][k] + t[2][k]) / 3) as Vec,
-        ab = t[0].map((_, k) => (t[0][k] + t[1][k]) / 2) as Vec,
-        bc = t[0].map((_, k) => (t[1][k] + t[2][k]) / 2) as Vec,
-        ca = t[0].map((_, k) => (t[2][k] + t[0][k]) / 2) as Vec;
-      for (const p of [t[0], t[1], t[2], ab, bc, ca, center])
-        measure(p, other, tree);
-      if (sampled++ % 32 === 0) await checkpoint();
-    }
-  }
-  // AABB overlap is not a penetration depth. For pipes and fittings it often
-  // equals a diameter even when only faceted boundary surfaces meet.
-  return depth >= eps ? depth * 1000 : 0;
 }
 export interface RunProgress {
   phase: string;
@@ -569,7 +550,21 @@ export async function calculate(
       } else {
         const xt = getTree(x),
           yt = getTree(y);
-        let triangleDepth = 0,
+        // The region both bodies share. Everything the depth is measured from
+        // lives inside it, so a far away part of a composite element is out.
+        const window: Box = {
+          min: x.bounds.min.map((v, k) =>
+            Math.max(v, y.bounds.min[k]),
+          ) as Vec,
+          max: x.bounds.max.map((v, k) =>
+            Math.min(v, y.bounds.max[k]),
+          ) as Vec,
+        };
+        const middle = window.min.map(
+          (v, k) => (v + window.max[k]) / 2,
+        ) as Vec;
+        const axes = new ContactAxes();
+        let closest = Infinity,
           testedPairs = 0;
         for (const [i, j] of queryPairs(xt, yt, eps)) {
           const tx = tri(x, i),
@@ -577,11 +572,15 @@ export async function calculate(
           if (!overlap(bounds(tx.flat()), bounds(ty.flat()), eps)) continue;
           const hit = trianglesIntersect(tx, ty, eps, check.touching);
           if (hit) {
-            const localDepth = check.touching
-              ? trianglePairPenetration(tx, ty)
-              : Math.max(trianglePairPenetration(tx, ty), eps);
-            if (!point || localDepth > triangleDepth) point = hit;
-            triangleDepth = Math.max(triangleDepth, localDepth);
+            // The marker belongs in the middle of the contact, not on whichever
+            // triangle happened to be tested first or happened to be largest.
+            const offset = norm(sub(hit, middle));
+            if (!point || offset < closest) {
+              point = hit;
+              closest = offset;
+            }
+            axes.add(tx);
+            axes.add(ty);
           }
           if (++testedPairs % 256 === 0) {
             if (performance.now() - lastProgress > 150) {
@@ -627,17 +626,26 @@ export async function calculate(
             }
             if (point) break;
           }
-        if (point)
-          penetrationMm = await penetrationEstimate(
-            x,
-            y,
-            xt,
-            yt,
-            point,
-            triangleDepth,
-            eps,
-            checkpoint,
-          );
+        if (point) {
+          const xIds = [...query(xt, window, eps)],
+            yIds = [...query(yt, window, eps)];
+          // A nested body never crosses a boundary, so it contributes no
+          // contact normals. Its own faces near the window take their place.
+          if (kind !== "surface") {
+            axes.addFrom(x, xIds);
+            axes.addFrom(y, yIds);
+          }
+          await checkpoint();
+          const thickness =
+            overlapThickness(x, y, xIds, yIds, axes.values(), window) * 1000;
+          // Zero thickness is a touch and nothing more. It belongs in the
+          // result only when the user asked for touches.
+          if (thickness <= 0 && !check.touching) continue;
+          penetrationMm = check.touching
+            ? thickness
+            : Math.max(check.precision, thickness);
+          await checkpoint();
+        }
         if (point && penetrationMm + check.precision < check.minPenetration)
           continue;
       }
