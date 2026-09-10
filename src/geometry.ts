@@ -489,6 +489,7 @@ function contactZones(
       );
     }
     zones = next;
+    if (cut && pass === 11) crowded = true;
     if (!cut) break;
   }
   return { zones, crowded };
@@ -539,7 +540,8 @@ function overlapThickness(
   hits: Vec[],
   eps: number,
   probe: (side: 0 | 1, p: Vec) => boolean,
-): { width: number; thin: boolean } {
+): { width: number; thin: boolean; approximate: boolean } {
+  let approximate = false;
   // What the contact itself spans along a direction: the points where the
   // surfaces cross, plus the corners of one body that sit inside the other.
   // Slower than reading the shadows, so it is kept for the directions where the
@@ -558,6 +560,7 @@ function overlapThickness(
       [y, yIds, 0],
     ] as [GeometryElement, number[], 0 | 1][]) {
       const step = Math.max(1, Math.floor(ids.length / 32));
+      if (step > 1) approximate = true;
       for (let i = 0; i < ids.length; i += step)
         for (const p of tri(e, ids[i])) if (probe(other, p)) note(dot(p, n));
     }
@@ -611,7 +614,7 @@ function overlapThickness(
   // A shared box with no extent of its own settles the matter: the bodies meet
   // over nothing. That is a touch, or geometry too flat to hold a volume.
   if (window.min.some((v, k) => window.max[k] - v <= 0))
-    return { width: 0, thin: false };
+    return { width: 0, thin: false, approximate: false };
   // Weighing every direction over a huge contact is not worth the wait. The set
   // is thinned by an even step rather than cut short, so what survives still
   // points all over instead of all one way.
@@ -622,6 +625,8 @@ function overlapThickness(
         ? axes.filter((_, index) => index < 3 || index % step === 0)
         : axes),
     ];
+  if (step > 1 && list.length < lead.length + axes.length)
+    approximate = true;
   // A boundary tells where a body ends, never where it continues. The space a
   // surface leaves open is probed, so a solid whose far side lies outside the
   // measured stretch still counts as filling it. Filling only ever widens a
@@ -652,8 +657,11 @@ function overlapThickness(
       a = shadow(x, xIds, n, from, to),
       b = shadow(y, yIds, n, from, to);
     let run = span(a, b);
-    if (run <= 0 && rescues++ < 32)
-      run = span(filled(0, a, n, from, to), filled(1, b, n, from, to));
+    if (run <= 0) {
+      if (rescues++ < 32)
+        run = span(filled(0, a, n, from, to), filled(1, b, n, from, to));
+      else approximate = true;
+    }
     // A direction whose surfaces still say nothing is unusable, not an answer,
     // and neither is one that answers below the tolerance the whole calculation
     // is run at. But when the contact's own directions come out that small, the
@@ -677,6 +685,7 @@ function overlapThickness(
   return {
     width: measured && Number.isFinite(best) ? best : 0,
     thin,
+    approximate,
   };
 }
 /**
@@ -939,7 +948,16 @@ export async function calculate(
         }
       } else {
         const xt = getTree(x),
-          yt = getTree(y);
+          yt = getTree(y),
+          // Measurement resolution must not turn a small real overlap into a
+          // touch. Predicates use a separate floating-point allowance, scaled
+          // to the coordinates; the user resolution still governs the reading.
+          coordinateScale = Math.max(
+            1,
+            ...x.bounds.min.map(Math.abs), ...x.bounds.max.map(Math.abs),
+            ...y.bounds.min.map(Math.abs), ...y.bounds.max.map(Math.abs),
+          ),
+          contactEps = Math.max(1e-10, coordinateScale * Number.EPSILON * 64);
         // The region both bodies share. Everything the depth is measured from
         // lives inside it, so a far away part of a composite element is out.
         const window: Box = {
@@ -965,7 +983,7 @@ export async function calculate(
           const tx = tri(x, i),
             ty = tri(y, j);
           if (!overlap(bounds(tx.flat()), bounds(ty.flat()), eps)) continue;
-          const hit = trianglesIntersect(tx, ty, eps, check.touching);
+          const hit = trianglesIntersect(tx, ty, contactEps, check.touching);
           if (hit) {
             // The marker belongs in the middle of the contact, not on whichever
             // triangle happened to be tested first or happened to be largest.
@@ -977,7 +995,7 @@ export async function calculate(
             axes.add(tx);
             axes.add(ty);
             if (seen++ % stride === 0) {
-              crossings(tx, ty, eps, hits);
+              crossings(tx, ty, contactEps, hits);
               if (!hits.length) hits.push(hit);
               if (hits.length >= 8192) {
                 for (let k = 0; k * 2 < hits.length; k++) hits[k] = hits[k * 2];
@@ -1003,7 +1021,7 @@ export async function calculate(
           const center = x.bounds.min.map(
             (v, k) => (v + x.bounds.max[k]) / 2,
           ) as Vec;
-          if (inside(center, x, xt, eps) && inside(center, y, yt, eps)) {
+          if (inside(center, x, xt, contactEps) && inside(center, y, yt, contactEps)) {
             point = center;
             kind = "contained";
           }
@@ -1021,7 +1039,7 @@ export async function calculate(
                   (_, k) => (t[0][k] + t[1][k] + t[2][k]) / 3,
                 ) as Vec;
               for (const p of [t[0], center])
-                if (inside(p, other, tree, eps)) {
+                if (inside(p, other, tree, contactEps)) {
                   point = p;
                   kind = "contained";
                   break;
@@ -1050,7 +1068,7 @@ export async function calculate(
             (v, k) => (v + window.max[k]) / 2,
           ) as Vec;
           const probe = (side: 0 | 1, p: Vec) =>
-            side === 0 ? inside(p, x, xt, eps) : inside(p, y, yt, eps);
+            side === 0 ? inside(p, x, xt, contactEps) : inside(p, y, yt, contactEps);
           // Only a gap that every anchor calls empty is really a gap. Split one
           // contact in half and the reported depth halves with it.
           // An anchor taken from the contact sits on a face of both bodies, and
@@ -1058,8 +1076,8 @@ export async function calculate(
           // a single contact into pieces and shrink every measurement.
           const solid = (side: 0 | 1, p: Vec) =>
             side === 0
-              ? inside(p, x, xt, eps) || onSurface(p, x, xt, eps)
-              : inside(p, y, yt, eps) || onSurface(p, y, yt, eps);
+              ? inside(p, x, xt, contactEps) || onSurface(p, x, xt, contactEps)
+              : inside(p, y, yt, contactEps) || onSurface(p, y, yt, contactEps);
           const empty = (n: Vec, at: number, anchors: Vec[]) =>
             x.closed &&
             y.closed &&
@@ -1084,9 +1102,8 @@ export async function calculate(
             kind === "surface" && hits.length > 2
               ? eigenAxes(hits, centreOfHits())[2]
               : undefined;
-          const holds =
-            !flat ||
-            overlapThickness(
+          const reach = flat
+            ? overlapThickness(
               x,
               y,
               baseX,
@@ -1096,19 +1113,24 @@ export async function calculate(
               window,
               centreOfHits(),
               hits,
-              eps,
+              contactEps,
               probe,
-            ).width > eps;
+            )
+            : undefined;
+          const holds = !reach || reach.width > contactEps;
+          // A sampled zero cannot prove that the contact has no volume.
+          const uncertainTouch = !holds && !!reach?.approximate;
           const hollowPair = hollow(x) || hollow(y);
           // The bodies meet over a surface and share no space behind it. There
           // is nothing to measure, and a width taken across that surface would
           // read as a deep conflict.
-          if (!hollowPair && !holds) kind = "touch";
+          if (!hollowPair && !holds && !uncertainTouch) kind = "touch";
           if (kind === "touch" && !check.touching) continue;
           const { zones, crowded } = contactZones(hits, window, eps, empty),
             list = axes.values();
           let thickness = 0,
-            resolved = true;
+            resolved = !uncertainTouch,
+            approximate = crowded || stride > 1 || !!reach?.approximate;
           for (const zone of kind === "touch" ? [] : zones) {
             const xIds = zone.limits.length
                 ? baseX.filter((i) => withinLimits(x, i, zone.limits))
@@ -1140,6 +1162,7 @@ export async function calculate(
               probe,
             );
             if (measurement.thin) resolved = false;
+            if (measurement.approximate) approximate = true;
             if (measurement.width > thickness) thickness = measurement.width;
             await checkpoint();
           }
@@ -1151,7 +1174,7 @@ export async function calculate(
           // The bodies do share space, so a direction that answered nothing
           // was unusable rather than right. Saying so beats inventing a number.
           else if (thickness <= 0 || !resolved) depthState = "tolerance";
-          else if (crowded) depthState = "approximate";
+          else if (approximate) depthState = "approximate";
           penetrationMm =
             kind === "touch" || depthState === "unmeasurable" || depthState === "tolerance"
               ? 0

@@ -68,9 +68,8 @@ export interface Clash {
   penetrationMm?: number;
   /**
    * How far the depth can be trusted. Absent means an ordinary measurement.
-   * "tolerance": the bodies overlap by less than the calculation resolves.
-   * "approximate": the contact holds more separate places than were separated,
-   * so the number can be larger than any single one of them.
+   * "tolerance": an overlap was found but its width could not be resolved.
+   * "approximate": contact splitting or geometric sampling was limited.
    * "unmeasurable": the geometry bounds no volume, so depth does not apply.
    */
   depth?: "tolerance" | "approximate" | "unmeasurable";
