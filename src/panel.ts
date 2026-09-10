@@ -224,7 +224,9 @@ export function mountPanel(
         (!state || r.state === state) &&
         (c?.type === "duplicates" ||
           r.unmeasured ||
-          (r.penetrationMm ?? 0) >= minDepth) &&
+          // Same allowance as the calculation itself, so one number typed in
+          // three places always selects the same conflicts.
+          (r.penetrationMm ?? 0) + (c?.precision ?? 0) >= minDepth) &&
         (!search ||
           JSON.stringify({ ...r, image: undefined })
             .toLowerCase()
