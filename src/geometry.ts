@@ -334,6 +334,9 @@ function overlapThickness(
   }
   return Number.isFinite(best) ? best : 0;
 }
+/** A sheet or a single face: no extent at all along one of the axes. */
+const isFlat = (e: GeometryElement, eps: number) =>
+  e.bounds.min.some((v, k) => e.bounds.max[k] - v <= eps);
 function pointOnTriangle(p: Vec, t: Vec[], eps: number): boolean {
   const u = sub(t[1], t[0]),
     v = sub(t[2], t[0]),
@@ -638,9 +641,11 @@ export async function calculate(
           await checkpoint();
           const thickness =
             overlapThickness(x, y, xIds, yIds, axes.values(), window) * 1000;
-          // Zero thickness is a touch and nothing more. It belongs in the
-          // result only when the user asked for touches.
-          if (thickness <= 0 && !check.touching) continue;
+          // A body with no thickness of its own, a sheet or a single face,
+          // can never produce a volumetric measurement. Its clash is real all
+          // the same, so only solids are allowed to fall out as a touch.
+          const measurable = !isFlat(x, eps) && !isFlat(y, eps);
+          if (thickness <= 0 && !check.touching && measurable) continue;
           penetrationMm = check.touching
             ? thickness
             : Math.max(check.precision, thickness);
