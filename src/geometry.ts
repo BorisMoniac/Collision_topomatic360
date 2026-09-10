@@ -197,6 +197,19 @@ function coplanarPoint(
       if (u >= 0 && u <= 1 && w >= 0 && w <= 1) return add(p, d, u);
     }
 }
+/**
+ * Every point where an edge of one triangle passes through the other. These are
+ * the corners of the line the two surfaces share, and a coarse mesh has so few
+ * of them that keeping only one per pair leaves the contact badly understated.
+ */
+function crossings(a: Vec[], b: Vec[], eps: number, out: Vec[]) {
+  for (let i = 0; i < 3; i++) {
+    const p = segmentTriangle(a[i], a[(i + 1) % 3], b, eps);
+    if (p) out.push(p);
+    const q = segmentTriangle(b[i], b[(i + 1) % 3], a, eps);
+    if (q) out.push(q);
+  }
+}
 export function trianglesIntersect(
   a: Vec[],
   b: Vec[],
@@ -286,6 +299,153 @@ class ContactAxes {
     ];
   }
 }
+/**
+ * The three directions a cloud of contacts is built on, widest spread first.
+ * A contact loop lies in a plane, and the last of these is that plane's normal,
+ * which is the way the two bodies press into each other. Taken from the contact
+ * itself, these turn with the pair and do not care how finely its surfaces are
+ * divided, so the measurement can rest on them instead of hoping that a useful
+ * face normal survived sampling.
+ */
+function eigenAxes(points: Vec[], centre: Vec): Vec[] {
+  const m = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (const p of points) {
+    const d = [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
+    for (let i = 0; i < 3; i++)
+      for (let j = 0; j < 3; j++) m[i][j] += d[i] * d[j];
+  }
+  const v = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  // Jacobi rotations: no chosen starting vector to bias the answer, unlike a
+  // power iteration, and all three directions come out at once.
+  for (let sweep = 0; sweep < 12; sweep++) {
+    let off = 0;
+    for (let i = 0; i < 3; i++)
+      for (let j = i + 1; j < 3; j++) off += m[i][j] * m[i][j];
+    if (off <= 1e-30) break;
+    for (let p = 0; p < 3; p++)
+      for (let q = p + 1; q < 3; q++) {
+        if (Math.abs(m[p][q]) <= 1e-30) continue;
+        const theta = (m[q][q] - m[p][p]) / (2 * m[p][q]),
+          t =
+            (theta >= 0 ? 1 : -1) /
+            (Math.abs(theta) + Math.sqrt(theta * theta + 1)),
+          c = 1 / Math.sqrt(t * t + 1),
+          sn = t * c;
+        for (const rows of [m, v])
+          for (let k = 0; k < 3; k++) {
+            const a = rows[k][p],
+              b = rows[k][q];
+            rows[k][p] = c * a - sn * b;
+            rows[k][q] = sn * a + c * b;
+          }
+        for (let k = 0; k < 3; k++) {
+          const a = m[p][k],
+            b = m[q][k];
+          m[p][k] = c * a - sn * b;
+          m[q][k] = sn * a + c * b;
+        }
+      }
+  }
+  return [0, 1, 2]
+    .sort((i, j) => m[j][j] - m[i][i])
+    .map((i) => unit([v[0][i], v[1][i], v[2][i]]))
+    .filter((u): u is Vec => !!u);
+}
+type Limit = { n: Vec; from: number; to: number };
+/**
+ * One pair can interfere in several separate places, and the empty space
+ * between two of them is not depth. Contacts are cut apart along the direction
+ * they spread the most as well as along the world axes, and a cut is accepted
+ * only where the space between the two sides lies outside at least one body.
+ * Choosing the direction from the contacts themselves is what keeps the answer
+ * the same when the same pair is turned in space.
+ */
+function contactZones(
+  hits: Vec[],
+  window: Box,
+  eps: number,
+  empty: (n: Vec, at: number, anchors: Vec[]) => boolean,
+): { hits: Vec[]; limits: Limit[] }[] {
+  const middle = window.min.map((v, k) => (v + window.max[k]) / 2) as Vec,
+    diagonal = norm(sub(window.max, window.min)),
+    least = Math.max(eps * 10, diagonal / 50);
+  const centreOf = (list: Vec[]) =>
+    [0, 1, 2].map(
+      (k) => list.reduce((sum, h) => sum + h[k], 0) / list.length,
+    ) as Vec;
+  let zones = [{ hits, limits: [] as Limit[] }];
+  for (let pass = 0; pass < 3; pass++) {
+    const next: typeof zones = [];
+    let cut = false;
+    for (const zone of zones) {
+      if (zone.hits.length < 2 || next.length + zones.length >= 8) {
+        next.push(zone);
+        continue;
+      }
+      const centre = centreOf(zone.hits),
+        directions: Vec[] = [
+          [1, 0, 0],
+          [0, 1, 0],
+          [0, 0, 1],
+        ],
+        main = eigenAxes(zone.hits, centre)[0];
+      if (main) directions.push(main);
+      let best: { n: Vec; at: number; size: number } | undefined;
+      for (const n of directions) {
+        const values = zone.hits.map((h) => dot(h, n)).sort((a, b) => a - b);
+        for (let i = 1; i < values.length; i++) {
+          const size = values[i] - values[i - 1];
+          if (size > least && (!best || size > best.size))
+            best = { n, at: (values[i] + values[i - 1]) / 2, size };
+        }
+      }
+      if (!best || !empty(best.n, best.at, [middle, centre])) {
+        next.push(zone);
+        continue;
+      }
+      cut = true;
+      const low: Vec[] = [],
+        high: Vec[] = [];
+      for (const h of zone.hits)
+        (dot(h, best.n) < best.at ? low : high).push(h);
+      next.push({
+        hits: low,
+        limits: [...zone.limits, { n: best.n, from: -Infinity, to: best.at }],
+      });
+      next.push({
+        hits: high,
+        limits: [...zone.limits, { n: best.n, from: best.at, to: Infinity }],
+      });
+    }
+    zones = next;
+    if (!cut) break;
+  }
+  return zones;
+}
+/** Whether a triangle reaches the part of the contact a zone stands for. */
+function withinLimits(e: GeometryElement, i: number, limits: Limit[]): boolean {
+  return limits.every(({ n, from, to }) => {
+    let low = Infinity,
+      high = -Infinity;
+    for (let j = 0; j < 9; j += 3) {
+      const d =
+        coordinate(e, i, j) * n[0] +
+        coordinate(e, i, j + 1) * n[1] +
+        coordinate(e, i, j + 2) * n[2];
+      if (d < low) low = d;
+      if (d > high) high = d;
+    }
+    return high >= from && low <= to;
+  });
+}
 type Span = [number, number];
 /**
  * Hard Clash depth as the thickness of the worst single interference.
@@ -309,9 +469,11 @@ function overlapThickness(
   y: GeometryElement,
   xIds: number[],
   yIds: number[],
+  lead: Vec[],
   axes: Vec[],
   window: Box,
   centre: Vec,
+  eps: number,
   probe: (side: 0 | 1, p: Vec) => boolean,
 ): number {
   const windowSpan = (n: Vec) => {
@@ -366,10 +528,12 @@ function overlapThickness(
   // is thinned by an even step rather than cut short, so what survives still
   // points all over instead of all one way.
   const step = Math.ceil((xIds.length + yIds.length) / 4096),
-    list =
-      step > 1
+    list = [
+      ...lead,
+      ...(step > 1
         ? axes.filter((_, index) => index < 3 || index % step === 0)
-        : axes;
+        : axes),
+    ];
   // A boundary tells where a body ends, never where it continues. The space a
   // surface leaves open is probed, so a solid whose far side lies outside the
   // measured stretch still counts as filling it. Filling only ever widens a
@@ -401,131 +565,14 @@ function overlapThickness(
     let run = span(a, b);
     if (run <= 0 && rescues++ < 32)
       run = span(filled(0, a, n, from, to), filled(1, b, n, from, to));
-    // A direction whose surfaces still say nothing is unusable, not an answer.
-    // Only when every direction stays silent is the contact really flat.
-    if (run <= 0) continue;
+    // A direction whose surfaces still say nothing is unusable, not an answer,
+    // and neither is one that answers below the tolerance the whole calculation
+    // is run at. Only when every direction stays silent is the contact flat.
+    if (run <= eps) continue;
     measured = true;
     if (run < best) best = run;
   }
   return measured && Number.isFinite(best) ? best : 0;
-}
-type Limit = { n: Vec; from: number; to: number };
-/** The direction a cloud of contacts spreads along the most. */
-function principal(points: Vec[], centre: Vec): Vec | undefined {
-  let xx = 0,
-    yy = 0,
-    zz = 0,
-    xy = 0,
-    xz = 0,
-    yz = 0;
-  for (const p of points) {
-    const a = p[0] - centre[0],
-      b = p[1] - centre[1],
-      c = p[2] - centre[2];
-    xx += a * a;
-    yy += b * b;
-    zz += c * c;
-    xy += a * b;
-    xz += a * c;
-    yz += b * c;
-  }
-  let v: Vec = [1, 1, 1];
-  for (let step = 0; step < 24; step++) {
-    const next = unit([
-      xx * v[0] + xy * v[1] + xz * v[2],
-      xy * v[0] + yy * v[1] + yz * v[2],
-      xz * v[0] + yz * v[1] + zz * v[2],
-    ]);
-    if (!next) return;
-    v = next;
-  }
-  return v;
-}
-/**
- * One pair can interfere in several separate places, and the empty space
- * between two of them is not depth. Contacts are cut apart along the direction
- * they spread the most as well as along the world axes, and a cut is accepted
- * only where the space between the two sides lies outside at least one body.
- * Choosing the direction from the contacts themselves is what keeps the answer
- * the same when the same pair is turned in space.
- */
-function contactZones(
-  hits: Vec[],
-  window: Box,
-  eps: number,
-  empty: (n: Vec, at: number, anchors: Vec[]) => boolean,
-): { hits: Vec[]; limits: Limit[] }[] {
-  const middle = window.min.map((v, k) => (v + window.max[k]) / 2) as Vec,
-    diagonal = norm(sub(window.max, window.min)),
-    least = Math.max(eps * 10, diagonal / 50);
-  const centreOf = (list: Vec[]) =>
-    [0, 1, 2].map(
-      (k) => list.reduce((sum, h) => sum + h[k], 0) / list.length,
-    ) as Vec;
-  let zones = [{ hits, limits: [] as Limit[] }];
-  for (let pass = 0; pass < 3; pass++) {
-    const next: typeof zones = [];
-    let cut = false;
-    for (const zone of zones) {
-      if (zone.hits.length < 2 || next.length + zones.length >= 8) {
-        next.push(zone);
-        continue;
-      }
-      const centre = centreOf(zone.hits),
-        directions: Vec[] = [
-          [1, 0, 0],
-          [0, 1, 0],
-          [0, 0, 1],
-        ],
-        main = principal(zone.hits, centre);
-      if (main) directions.push(main);
-      let best: { n: Vec; at: number; size: number } | undefined;
-      for (const n of directions) {
-        const values = zone.hits.map((h) => dot(h, n)).sort((a, b) => a - b);
-        for (let i = 1; i < values.length; i++) {
-          const size = values[i] - values[i - 1];
-          if (size > least && (!best || size > best.size))
-            best = { n, at: (values[i] + values[i - 1]) / 2, size };
-        }
-      }
-      if (!best || !empty(best.n, best.at, [middle, centre])) {
-        next.push(zone);
-        continue;
-      }
-      cut = true;
-      const low: Vec[] = [],
-        high: Vec[] = [];
-      for (const h of zone.hits)
-        (dot(h, best.n) < best.at ? low : high).push(h);
-      next.push({
-        hits: low,
-        limits: [...zone.limits, { n: best.n, from: -Infinity, to: best.at }],
-      });
-      next.push({
-        hits: high,
-        limits: [...zone.limits, { n: best.n, from: best.at, to: Infinity }],
-      });
-    }
-    zones = next;
-    if (!cut) break;
-  }
-  return zones;
-}
-/** Whether a triangle reaches the part of the contact a zone stands for. */
-function withinLimits(e: GeometryElement, i: number, limits: Limit[]): boolean {
-  return limits.every(({ n, from, to }) => {
-    let low = Infinity,
-      high = -Infinity;
-    for (let j = 0; j < 9; j += 3) {
-      const d =
-        coordinate(e, i, j) * n[0] +
-        coordinate(e, i, j + 1) * n[1] +
-        coordinate(e, i, j + 2) * n[2];
-      if (d < low) low = d;
-      if (d > high) high = d;
-    }
-    return high >= from && low <= to;
-  });
 }
 /**
  * Whether a mesh encloses anything at all. A sheet, a single face or a folded
@@ -573,14 +620,18 @@ function pointOnTriangle(p: Vec, t: Vec[], eps: number): boolean {
     tol = eps / Math.max(norm(u), norm(v), eps);
   return s >= -tol && r >= -tol && s + r <= 1 + tol;
 }
+function onSurface(p: Vec, e: GeometryElement, tree: Node, eps: number) {
+  for (const i of query(tree, { min: p, max: p }, eps))
+    if (pointOnTriangle(p, tri(e, i), eps)) return true;
+  return false;
+}
 function inside(p: Vec, e: GeometryElement, tree: Node, eps: number): boolean {
   if (
     !e.closed ||
     p.some((v, k) => v <= e.bounds.min[k] + eps || v >= e.bounds.max[k] - eps)
   )
     return false;
-  for (const i of query(tree, { min: p, max: p }, eps))
-    if (pointOnTriangle(p, tri(e, i), eps)) return false;
+  if (onSurface(p, e, tree, eps)) return false;
   const direction: Vec = [1, 0.371390676, 0.52999894];
   const extent = norm(sub(e.bounds.max, e.bounds.min)) * 3 + 1;
   const end = add(p, direction, extent),
@@ -651,7 +702,9 @@ export async function calculate(
   const hollow = (e: GeometryElement) => {
     let value = hollows.get(e.id);
     if (value === undefined) {
-      value = volumeless(e, eps);
+      // A shell the host could not close is not a body: its triangles may still
+      // sum to a volume, and that number would mean nothing.
+      value = !e.closed || volumeless(e, eps);
       hollows.set(e.id, value);
     }
     return value;
@@ -817,7 +870,8 @@ export async function calculate(
             axes.add(tx);
             axes.add(ty);
             if (seen++ % stride === 0) {
-              hits.push(hit);
+              crossings(tx, ty, eps, hits);
+              if (!hits.length) hits.push(hit);
               if (hits.length >= 8192) {
                 for (let k = 0; k * 2 < hits.length; k++) hits[k] = hits[k * 2];
                 hits.length = Math.ceil(hits.length / 2);
@@ -892,12 +946,19 @@ export async function calculate(
             side === 0 ? inside(p, x, xt, eps) : inside(p, y, yt, eps);
           // Only a gap that every anchor calls empty is really a gap. Split one
           // contact in half and the reported depth halves with it.
+          // An anchor taken from the contact sits on a face of both bodies, and
+          // a point on a face is not empty space. Reading it as empty would cut
+          // a single contact into pieces and shrink every measurement.
+          const solid = (side: 0 | 1, p: Vec) =>
+            side === 0
+              ? inside(p, x, xt, eps) || onSurface(p, x, xt, eps)
+              : inside(p, y, yt, eps) || onSurface(p, y, yt, eps);
           const empty = (n: Vec, at: number, anchors: Vec[]) =>
             x.closed &&
             y.closed &&
             anchors.every((anchor) => {
               const p = add(anchor, n, at - dot(anchor, n));
-              return !probe(0, p) || !probe(1, p);
+              return !solid(0, p) || !solid(1, p);
             });
           const zones = contactZones(hits, window, eps, empty),
             list = axes.values();
@@ -916,14 +977,19 @@ export async function calculate(
                       zone.hits.length,
                   ) as Vec)
                 : middle;
+            // Directions the contact itself supplies come first: a loop of
+            // contacts lies in a plane, and its normal is the way the bodies
+            // press together. Face normals only sharpen what those give.
             const deep = overlapThickness(
               x,
               y,
               xIds,
               yIds,
+              zone.hits.length > 2 ? eigenAxes(zone.hits, anchor) : [],
               list,
               window,
               anchor,
+              eps,
               probe,
             );
             if (deep > thickness) thickness = deep;
