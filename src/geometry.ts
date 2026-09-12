@@ -5,6 +5,7 @@ import {
   Vec,
   info,
   matches,
+  selectionProblem,
   passesDepth,
   pairKey,
 } from "./domain";
@@ -1101,10 +1102,10 @@ export async function calculate(
   const chosen = elements.filter((e) => check.includeHidden || !e.hidden),
     a = chosen.filter((e) => matches(e, check.a)),
     b = chosen.filter((e) => matches(e, check.b));
-  if (!a.length || !b.length)
-    throw Error(
-      "Выборка А или Б не содержит элементов. Отметьте хотя бы одну модель в каждой стороне проверки.",
-    );
+  if (!a.length || !b.length) {
+    const side = !a.length ? "А" : "Б", selection = !a.length ? check.a : check.b;
+    throw Error(`Выбор ${side}: ${selectionProblem(elements, selection, check.includeHidden)}`);
+  }
   let tick = performance.now();
   const checkpoint = async () => {
     if (aborted())

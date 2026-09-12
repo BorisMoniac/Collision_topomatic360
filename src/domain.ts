@@ -162,6 +162,23 @@ export function matches(e: ElementInfo, s: Selection): boolean {
     return false;
   return true;
 }
+export function selectionProblem(elements: ElementInfo[], s: Selection, includeHidden: boolean): string | undefined {
+  if (!s.manualOnly && s.modelsMode === "selected" && !s.models.length && !s.include.length)
+    return "Не отмечены модели. Выберите файлы или включите «Все модели».";
+  let matching = 0;
+  for (const element of elements) {
+    if (!matches(element, s)) continue;
+    matching++;
+    if (includeHidden || !element.hidden) return;
+  }
+  if (matching)
+    return `Все выбранные элементы (${matching}) скрыты. Покажите их в модели или включите «Включать скрытые элементы» на вкладке «Правила».`;
+  if (s.manualOnly)
+    return "Ручная выборка пуста. Выделите элементы в 3D заново или нажмите «Сбросить ручной выбор».";
+  if (s.exclude.length)
+    return "Нет элементов после ручных исключений. Проверьте исключения или нажмите «Сбросить ручной выбор».";
+  return "В выбранных моделях нет доступных элементов. Обновите модели и проверьте состав выборки.";
+}
 export const configKey = (c: Check) =>
   JSON.stringify([
     c.type,

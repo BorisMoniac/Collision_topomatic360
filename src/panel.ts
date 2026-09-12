@@ -10,6 +10,7 @@ import {
   State,
   configKey,
   matches,
+  selectionProblem,
   passesDepth,
   newCheck,
   readProject,
@@ -381,24 +382,6 @@ export function mountPanel(
     }
     return [...ids];
   };
-  const syncVisibleModelSelections = () => {
-    const c = check();
-    if (!c || tab !== "select") return;
-    for (const article of root.querySelectorAll<HTMLElement>("[data-side]")) {
-      const side = article.dataset.side as "a" | "b",
-        boxes = [...article.querySelectorAll<HTMLInputElement>(".model-check")];
-      if (!boxes.length) continue;
-      const values = boxes
-          .filter((item) => item.checked)
-          .map((item) => item.value),
-        all = values.length === boxes.length,
-        s = c[side];
-      s.modelsMode = all ? "all" : "selected";
-      s.models = all ? [] : values;
-      s.conditions = [];
-      s.mode = "all";
-    }
-  };
   const scanScope = (targets?: Check[]) => {
     if (!targets?.length) return undefined;
     const ids = new Set<string>();
@@ -619,6 +602,7 @@ export function mountPanel(
       () => aborted,
       scope,
     );
+    reconcileModelSelections(snapshot.models);
     q("model-count").textContent =
       `Проиндексировано моделей: ${snapshot.indexedModelIds.length} из ${snapshot.models.length} · элементов: ${snapshot.elements.length}`;
     render();
@@ -733,7 +717,6 @@ export function mountPanel(
   async function run(all = false) {
     if (busy) return;
     switchProject();
-    syncVisibleModelSelections();
     const targets = all
       ? [...saved.checks]
       : ([check()].filter(Boolean) as Check[]);
@@ -756,7 +739,8 @@ export function mountPanel(
         );
       for (const c of targets) {
         if (aborted) break;
-        for (const s of [c.a, c.b]) {
+        for (const side of ["a", "b"] as const) {
+          const s = c[side], label = side === "a" ? "А" : "Б";
           if (
             s.modelsMode === "selected" &&
             s.models.some((id) => !snapshot!.models.some((m) => m.id === id))
@@ -770,6 +754,8 @@ export function mountPanel(
             throw Error(
               `${c.name}: вручную добавленный элемент отсутствует в модели.`,
             );
+          const problem = selectionProblem(snapshot!.elements, s, c.includeHidden);
+          if (problem) throw Error(`${c.name} · выбор ${label}: ${problem}`);
         }
         const config = configKey(c);
         if (
@@ -871,7 +857,6 @@ export function mountPanel(
   };
   q("scan").onclick = () =>
     action(async () => {
-      syncVisibleModelSelections();
       aborted = false;
       setBusy(true);
       showProgress("Чтение моделей");
@@ -987,6 +972,7 @@ export function mountPanel(
       )
         return;
       saved = incoming;
+      if (snapshot && host.isCurrent()) reconcileModelSelections(snapshot.models);
       if (projectToken) projects.set(projectToken, saved);
       storeSession(projectId, saved);
       current = saved.checks[0]?.id || "";
