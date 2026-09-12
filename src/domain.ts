@@ -48,6 +48,8 @@ export interface GeometryElement extends ElementInfo {
   indices?: Uint32Array;
   triangleCount?: number;
   closed: boolean;
+  /** Calculation-only interior reconstruction for imperfect surface meshes. */
+  interior?: "winding";
   bounds: { min: Vec; max: Vec };
 }
 export interface Clash {
@@ -69,7 +71,7 @@ export interface Clash {
   /**
    * How far the depth can be trusted. Absent means an ordinary measurement.
    * "tolerance": an overlap was found but its width could not be resolved.
-   * "approximate": contact splitting or geometric sampling was limited.
+   * "approximate": reconstructed interior/seams or limited geometric sampling.
    * "unmeasurable": the geometry bounds no volume, so depth does not apply.
    */
   depth?: "tolerance" | "approximate" | "unmeasurable";

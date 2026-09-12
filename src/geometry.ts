@@ -8,7 +8,7 @@ import {
   pairKey,
 } from "./domain";
 type Box = { min: Vec; max: Vec };
-type Node = Box & { left?: Node; right?: Node; ids?: number[] };
+type Node = Box & { left?: Node; right?: Node; ids?: number[]; moment?: Vec };
 const sub = (a: Vec, b: Vec): Vec => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const add = (a: Vec, b: Vec, t = 1): Vec => [
   a[0] + b[0] * t,
@@ -113,7 +113,7 @@ function* queryPairs(
   yield* queryPairs(a.right!, b.left!, eps);
   yield* queryPairs(a.right!, b.right!, eps);
 }
-function buildElements(elements: GeometryElement[], ids: number[]): Node {
+function buildElements(elements: { bounds: Box }[], ids: number[]): Node {
   const box: Box = {
     min: [Infinity, Infinity, Infinity],
     max: [-Infinity, -Infinity, -Infinity],
@@ -540,6 +540,7 @@ function overlapThickness(
   hits: Vec[],
   eps: number,
   probe: (side: 0 | 1, p: Vec) => boolean,
+  containment = false,
 ): { width: number; thin: boolean; approximate: boolean } {
   let approximate = false;
   // What the contact itself spans along a direction: the points where the
@@ -662,6 +663,14 @@ function overlapThickness(
         run = span(filled(0, a, n, from, to), filled(1, b, n, from, to));
       else approximate = true;
     }
+    // Proven points of a contained overlap bound its projection from below.
+    // A coincident end face alone must not shrink a substantial interior to
+    // the rounding noise between two almost coincident planes.
+    if (containment && hits.length > 1) {
+      let low = Infinity, high = -Infinity;
+      for (const p of hits) { const d = dot(p, n); low = Math.min(low, d); high = Math.max(high, d); }
+      run = Math.max(run, high - low);
+    }
     // A direction whose surfaces still say nothing is unusable, not an answer,
     // and neither is one that answers below the tolerance the whole calculation
     // is run at. But when the contact's own directions come out that small, the
@@ -715,6 +724,131 @@ function volumeless(e: GeometryElement, eps: number): boolean {
   }
   return Math.abs(volume) <= eps * area;
 }
+const numericalEpsilon = (e: GeometryElement) =>
+  Math.max(1e-10, Math.max(1, ...e.bounds.min.map(Math.abs), ...e.bounds.max.map(Math.abs)) * Number.EPSILON * 64);
+
+/** Reconstruct closure across mesh seams without changing the source buffers.
+ * SDK flags describe individual meshes, not necessarily the assembled element.
+ * Pair welded edges and propagate face orientation before testing each component's
+ * volume. Oppositely oriented components must not cancel one another's volume.
+ * No holes are capped and no user tolerance is used to seal real gaps.
+ */
+type SolidAssessment = { closed: boolean; approximate: boolean; winding?: boolean };
+async function assembledSolid(e: GeometryElement, checkpoint: () => Promise<void>, seamTolerance: number): Promise<SolidAssessment> {
+  const eps = numericalEpsilon(e), count = triangleCount(e);
+  const open = { closed: false, approximate: false };
+  if (e.closed && !volumeless(e, eps)) return { closed: true, approximate: false };
+  const parent = new Uint32Array(count), rank = new Uint8Array(count),
+    flip = new Uint8Array(count), active = new Uint8Array(count);
+  for (let i = 0; i < count; i++) parent[i] = i;
+  const root = (i: number): number => {
+    if (parent[i] !== i) {
+      const p = parent[i];
+      parent[i] = root(p);
+      flip[i] ^= flip[p];
+    }
+    return parent[i];
+  };
+  const join = (a: number, b: number, parity: number) => {
+    let ra = root(a), rb = root(b);
+    const delta = flip[a] ^ flip[b] ^ parity;
+    if (ra === rb) return delta === 0;
+    if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra];
+    parent[rb] = ra; flip[rb] = delta;
+    if (rank[ra] === rank[rb]) rank[ra]++;
+    return true;
+  };
+  const vertices = new Map<string, number>(), locations: number[] = [], edges = new Map<number | string, number>();
+  const edgeStride = count * 3, numericKeys = edgeStride * edgeStride <= Number.MAX_SAFE_INTEGER;
+  const edgeKey = (a: number, b: number) => numericKeys ? a * edgeStride + b : `${a},${b}`;
+  // Work relative to the element to avoid rounding world coordinates twice.
+  const vertex = (p: Vec, location: number) => {
+    const key = p.map((v, k) => Math.round((v - e.bounds.min[k]) / eps)).join(",");
+    let id = vertices.get(key);
+    if (id === undefined) { id = vertices.size; vertices.set(key, id); locations.push(location); }
+    return id;
+  };
+  for (let i = 0; i < count; i++) {
+    if (i % 2048 === 0) await checkpoint();
+    const t = tri(e, i);
+    if (norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) <= eps * eps) continue;
+    const ids = t.map((p, j) => vertex(p, i * 3 + j));
+    if (new Set(ids).size !== 3) continue;
+    active[i] = 1;
+    for (let k = 0; k < 3; k++) {
+      const a = ids[k], b = ids[(k + 1) % 3], forward = a < b;
+      const key = forward ? edgeKey(a, b) : edgeKey(b, a);
+      const previous = edges.get(key);
+      if (previous === undefined) edges.set(key, (i + 1) * (forward ? 1 : -1));
+      else {
+        if (previous === 0 || !join(i, Math.abs(previous) - 1, Number((previous > 0) === forward))) return open;
+        edges.set(key, 0);
+      }
+    }
+  }
+  // Faces may split the same seam differently (one long edge against several
+  // short ones). Require complete, exactly double coverage; never fill a hole.
+  // Small non-collinearity from independent tessellation is accepted only up
+  // to 0.01 mm and the requested resolution, and makes the depth approximate.
+  const pointAt = (id: number): Vec => {
+    const location = locations[id];
+    return [0, 1, 2].map(k => coordinate(e, Math.floor(location / 3), (location % 3) * 3 + k)) as Vec;
+  };
+  const boundary: {p: Vec; q: Vec; face: number; bounds: Box}[] = [];
+  for (const [key, face] of edges) if (face !== 0) {
+    const ids = typeof key === "number" ? [Math.floor(key / edgeStride), key % edgeStride] : key.split(",").map(Number);
+    const p = pointAt(ids[0]), q = pointAt(ids[1]);
+    boundary.push({ p, q, face, bounds: bounds([...p, ...q]) });
+    if (boundary.length % 2048 === 0) await checkpoint();
+  }
+  vertices.clear(); edges.clear(); locations.length = 0;
+  let approximate = false;
+  if (boundary.length) {
+    const seamEps = Math.max(eps, Math.min(0.00001, seamTolerance));
+    const tree = buildElements(boundary, boundary.map((_, i) => i));
+    for (let i = 0; i < boundary.length; i++) {
+      if (i % 128 === 0) await checkpoint();
+      const a = boundary[i], vector = sub(a.q, a.p), length = norm(vector), n = unit(vector)!;
+      const coverage: [number, number][] = [];
+      for (const j of query(tree, a.bounds, seamEps)) {
+        if (i === j) continue;
+        const b = boundary[j], p = sub(b.p, a.p), q = sub(b.q, a.p),
+          lo = dot(p, n), hi = dot(q, n),
+          from = Math.max(0, Math.min(lo, hi)), to = Math.min(length, Math.max(lo, hi));
+        if (to - from <= eps) continue;
+        const error = Math.max(norm(add(p, n, -lo)), norm(add(q, n, -hi)));
+        if (error > seamEps) continue;
+        const sameDirection = (hi > lo) === ((a.face > 0) === (b.face > 0));
+        if (!join(Math.abs(a.face) - 1, Math.abs(b.face) - 1, Number(sameDirection))) return open;
+        if (error > eps) approximate = true;
+        coverage.push([from, to]);
+      }
+      coverage.sort((a, b) => a[0] - b[0]);
+      let end = 0;
+      for (const [from, to] of coverage) {
+        if (Math.abs(from - end) > eps) return open;
+        end = to;
+      }
+      if (Math.abs(end - length) > eps) return open;
+    }
+  }
+  const volumes = new Float64Array(count), areas = new Float64Array(count);
+  const centre = e.bounds.min.map((v, k) => (v + e.bounds.max[k]) / 2) as Vec;
+  for (let i = 0; i < count; i++) {
+    if (i % 2048 === 0) await checkpoint();
+    if (!active[i]) continue;
+    const r = root(i), t = tri(e, i);
+    volumes[r] += (flip[i] ? -1 : 1) * dot(sub(t[0], centre), cross(sub(t[1], centre), sub(t[2], centre))) / 6;
+    areas[r] += norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2;
+  }
+  let volume = 0;
+  for (let i = 0; i < count; i++) {
+    // A zero-volume component cannot establish an interior, even if doubled.
+    if (areas[i] && Math.abs(volumes[i]) <= eps * areas[i]) return open;
+    volume += Math.abs(volumes[i]);
+  }
+  return { closed: volume > 0, approximate };
+}
 function pointOnTriangle(p: Vec, t: Vec[], eps: number): boolean {
   const u = sub(t[1], t[0]),
     v = sub(t[2], t[0]),
@@ -739,15 +873,74 @@ function onSurface(p: Vec, e: GeometryElement, tree: Node, eps: number) {
     if (pointOnTriangle(p, tri(e, i), eps)) return true;
   return false;
 }
+const volumetric = (e: GeometryElement) => e.closed || e.interior === "winding";
+/** Generalized winding number: oriented solid angle / 4pi. Unlike a single
+ * parity ray this tolerates cracks in the boundary. Distant BVH nodes use the
+ * area-vector term; nodes near the query are evaluated triangle by triangle.
+ * This is only used for explicitly approximate interior reconstruction.
+ */
+function windingNumber(p: Vec, e: GeometryElement, tree: Node, exact = false): number {
+  const moment = (node: Node): Vec => {
+    if (node.moment) return node.moment;
+    const area: Vec = [0, 0, 0];
+    if (node.ids) {
+      for (const i of node.ids) {
+        const t = tri(e, i), n = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+        for (let k = 0; k < 3; k++) area[k] += n[k] / 2;
+      }
+    } else {
+      const a = moment(node.left!), b = moment(node.right!);
+      for (let k = 0; k < 3; k++) area[k] = a[k] + b[k];
+    }
+    return node.moment = area;
+  };
+  const visit = (node: Node): number => {
+    const centre = node.min.map((v, k) => (v + node.max[k]) / 2) as Vec,
+      r = sub(centre, p), distance = norm(r), radius = norm(sub(node.max, node.min)) / 2;
+    if (!exact && distance > radius * 10 && distance > 0)
+      return dot(moment(node), r) / (distance * distance * distance);
+    if (!node.ids) return visit(node.left!) + visit(node.right!);
+    let angle = 0;
+    for (const i of node.ids) {
+      const t = tri(e, i), a = sub(t[0], p), b = sub(t[1], p), c = sub(t[2], p),
+        na = norm(a), nb = norm(b), nc = norm(c);
+      if (!na || !nb || !nc) continue;
+      angle += 2 * Math.atan2(dot(a, cross(b, c)), na * nb * nc + dot(a, b) * nc + dot(b, c) * na + dot(c, a) * nb);
+    }
+    return angle;
+  };
+  return visit(tree) / (4 * Math.PI);
+}
+async function hasWindingInterior(e: GeometryElement, tree: Node, checkpoint: () => Promise<void>) {
+  const eps = numericalEpsilon(e);
+  const confirms = (p: Vec) => !onSurface(p, e, tree, eps) && Math.abs(windingNumber(p, e, tree)) > 0.9;
+  const centre = e.bounds.min.map((v, k) => (v + e.bounds.max[k]) / 2) as Vec;
+  if (confirms(centre)) return true;
+  const count = triangleCount(e), step = Math.max(1, Math.ceil(count / 32));
+  for (let i = 0; i < count; i += step) {
+    await checkpoint();
+    const t = tri(e, i), n = unit(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+    if (!n) continue;
+    const p = [0, 1, 2].map(k => (t[0][k] + t[1][k] + t[2][k]) / 3) as Vec;
+    const offset = Math.max(eps * 8, Math.min(norm(sub(t[0], t[1])), norm(sub(t[1], t[2])), norm(sub(t[2], t[0]))) * 0.01);
+    if (confirms(add(p, n, offset)) || confirms(add(p, n, -offset))) return true;
+  }
+  return false;
+}
 function inside(p: Vec, e: GeometryElement, tree: Node, eps: number): boolean {
   // Only points outside the box are refused here. Shrinking the box by the
   // tolerance instead would call the whole of a thin overlap outside the body.
   if (
-    !e.closed ||
+    !volumetric(e) ||
     p.some((v, k) => v < e.bounds.min[k] - eps || v > e.bounds.max[k] + eps)
   )
     return false;
   if (onSurface(p, e, tree, eps)) return false;
+  if (e.interior === "winding") {
+    const w = Math.abs(windingNumber(p, e, tree));
+    // Refine ambiguous values rather than deciding on the far-field estimate.
+    return Math.abs(w - 0.5) < 0.05 ? Math.abs(windingNumber(p, e, tree, true)) > 0.5 : w > 0.5;
+  }
   const direction: Vec = [1, 0.371390676, 0.52999894];
   const extent = norm(sub(e.bounds.max, e.bounds.min)) * 3 + 1;
   const end = add(p, direction, extent),
@@ -814,16 +1007,18 @@ export async function calculate(
     }
     return n;
   };
-  const hollows = new Map<string, boolean>();
-  const hollow = (e: GeometryElement) => {
-    let value = hollows.get(e.id);
-    if (value === undefined) {
-      // A shell the host could not close is not a body: its triangles may still
-      // sum to a volume, and that number would mean nothing.
-      value = !e.closed || volumeless(e, eps);
-      hollows.set(e.id, value);
+  const solids = new Map<string, SolidAssessment>();
+  const prepared = async (e: GeometryElement) => {
+    if (check.type !== "intersection") return e;
+    let solid = solids.get(e.id);
+    if (solid === undefined) {
+      solid = await assembledSolid(e, checkpoint, eps);
+      if (!solid.closed && await hasWindingInterior(e, getTree(e), checkpoint))
+        solid = { closed: false, approximate: true, winding: true };
+      solids.set(e.id, solid);
     }
-    return value;
+    return solid.winding ? { ...e, closed: false, interior: "winding" as const } :
+      solid.closed === e.closed ? e : { ...e, closed: solid.closed };
   };
   const signatures = new Map<string, string>();
   const signature = async (e: GeometryElement) => {
@@ -926,8 +1121,8 @@ export async function calculate(
         continue;
       if (xm.id > ym.id && aIds.has(ym.id) && bIds.has(xm.id)) continue;
       const id = pairKey(xm.id, ym.id);
-      const x = await hydrate(xm),
-        y = await hydrate(ym, xm.id);
+      const x = await prepared(await hydrate(xm)),
+        y = await prepared(await hydrate(ym, xm.id));
       let point: Vec | undefined,
         kind: Clash["kind"] = "surface",
         penetrationMm = 0,
@@ -1017,10 +1212,8 @@ export async function calculate(
             await checkpoint();
           }
         }
-        if (!point && x.closed && y.closed) {
-          const center = x.bounds.min.map(
-            (v, k) => (v + x.bounds.max[k]) / 2,
-          ) as Vec;
+        if (!point && volumetric(x) && volumetric(y)) {
+          const center = middle;
           if (inside(center, x, xt, contactEps) && inside(center, y, yt, contactEps)) {
             point = center;
             kind = "contained";
@@ -1032,7 +1225,7 @@ export async function calculate(
             [x, y, yt],
             [y, x, xt],
           ] as const) {
-            if (!other.closed) continue;
+            if (!volumetric(other)) continue;
             for (let i = 0; i < triangleCount(first) && !point; i++) {
               const t = tri(first, i),
                 center = t[0].map(
@@ -1078,9 +1271,42 @@ export async function calculate(
             side === 0
               ? inside(p, x, xt, contactEps) || onSurface(p, x, xt, contactEps)
               : inside(p, y, yt, contactEps) || onSurface(p, y, yt, contactEps);
+          if (kind === "contained") {
+            const step = Math.max(1, Math.ceil((baseX.length + baseY.length) / 4096));
+            stride = Math.max(stride, step);
+            const visited = new Set<string>();
+            for (const [e, ids, other] of [[x, baseX, 1], [y, baseY, 0]] as const) {
+              for (let j = 0; j < ids.length; j += step) {
+                if (j % (step * 32) === 0) await checkpoint();
+                for (const p of tri(e, ids[j])) {
+                  const key = p.join(",");
+                  if (visited.has(key)) continue;
+                  visited.add(key);
+                  if (solid(other, p)) hits.push(p);
+                }
+              }
+              visited.clear();
+            }
+            // With an imperfect shell the reconstructed intersection can have
+            // an interior even when its original boundary vertices coincide.
+            // Deterministic interior witnesses prevent a seam-sized reading
+            // from representing an overlap that occupies a substantial volume.
+            if (x.interior === "winding" || y.interior === "winding") {
+              const halton = (i: number, base: number) => {
+                let f = 1, result = 0;
+                for (; i; i = Math.floor(i / base)) { f /= base; result += f * (i % base); }
+                return result;
+              };
+              for (let i = 1; i <= 2048; i++) {
+                if (i % 16 === 0) await checkpoint();
+                const p = [2, 3, 5].map((base, k) => window.min[k] + halton(i, base) * (window.max[k] - window.min[k])) as Vec;
+                if (probe(0, p) && probe(1, p)) hits.push(p);
+              }
+            }
+          }
           const empty = (n: Vec, at: number, anchors: Vec[]) =>
-            x.closed &&
-            y.closed &&
+            volumetric(x) &&
+            volumetric(y) &&
             anchors.every((anchor) => {
               const p = add(anchor, n, at - dot(anchor, n));
               return !solid(0, p) || !solid(1, p);
@@ -1120,7 +1346,7 @@ export async function calculate(
           const holds = !reach || reach.width > contactEps;
           // A sampled zero cannot prove that the contact has no volume.
           const uncertainTouch = !holds && !!reach?.approximate;
-          const hollowPair = hollow(x) || hollow(y);
+          const hollowPair = !volumetric(x) || !volumetric(y);
           // The bodies meet over a surface and share no space behind it. There
           // is nothing to measure, and a width taken across that surface would
           // read as a deep conflict.
@@ -1130,7 +1356,8 @@ export async function calculate(
             list = axes.values();
           let thickness = 0,
             resolved = !uncertainTouch,
-            approximate = crowded || stride > 1 || !!reach?.approximate;
+            approximate = crowded || stride > 1 || !!reach?.approximate ||
+              !!solids.get(x.id)?.approximate || !!solids.get(y.id)?.approximate;
           for (const zone of kind === "touch" ? [] : zones) {
             const xIds = zone.limits.length
                 ? baseX.filter((i) => withinLimits(x, i, zone.limits))
@@ -1158,8 +1385,9 @@ export async function calculate(
               window,
               anchor,
               zone.hits,
-              eps,
+              contactEps,
               probe,
+              kind === "contained",
             );
             if (measurement.thin) resolved = false;
             if (measurement.approximate) approximate = true;
@@ -1178,7 +1406,7 @@ export async function calculate(
           penetrationMm =
             kind === "touch" || depthState === "unmeasurable" || depthState === "tolerance"
               ? 0
-              : Math.max(check.precision, thickness);
+              : thickness;
           await checkpoint();
         }
         // A conflict whose depth is not a plain measurement must never vanish
