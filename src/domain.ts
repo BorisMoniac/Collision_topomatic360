@@ -68,6 +68,11 @@ export interface Clash {
   /** Camera distance the stored image was framed at, in metres. */
   imageDistance?: number;
   penetrationMm?: number;
+  /** Original local overlap estimate, retained when axial entry is available. */
+  overlapThicknessMm?: number;
+  /** Length of a straight element inside the other element's outer envelope. */
+  axialPenetrationMm?: number;
+  axialElementId?: string;
   /**
    * How far the depth can be trusted. Absent means an ordinary measurement.
    * "tolerance": an overlap was found but its width could not be resolved.
@@ -99,6 +104,10 @@ export interface Check {
   status: "new" | "done" | "stale";
   warnings: string[];
 }
+/** Unknown depths stay reviewable; numeric estimates use the user's cutoff. */
+export const passesDepth = (r: Pick<Clash, "kind" | "depth" | "penetrationMm">, minimum: number, precision: number) =>
+  r.kind === "duplicate" || r.depth === "unmeasurable" || r.depth === "tolerance" ||
+  (r.penetrationMm ?? 0) + precision >= minimum;
 export interface Project {
   format: "nashepo.checks";
   version: 1;
@@ -350,6 +359,12 @@ export function readProject(text: string): Project {
       )
         throw Error("Некорректная достоверность глубины результата.");
       if (r?.unmeasured && !r.depth) r.depth = "unmeasurable";
+      for (const value of [r?.overlapThicknessMm, r?.axialPenetrationMm])
+        if (value !== undefined && (!Number.isFinite(value) || value < 0))
+          throw Error("Некорректный размер пересечения.");
+      if (r?.axialElementId !== undefined &&
+          (typeof r.axialElementId !== "string" || ![r.a?.id, r.b?.id].includes(r.axialElementId)))
+        throw Error("Некорректный элемент продольного замера.");
       if (
         !r ||
         typeof r.id !== "string" ||

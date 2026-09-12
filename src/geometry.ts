@@ -5,6 +5,7 @@ import {
   Vec,
   info,
   matches,
+  passesDepth,
   pairKey,
 } from "./domain";
 type Box = { min: Vec; max: Vec };
@@ -969,6 +970,124 @@ export interface RunProgress {
   total: number;
   found: number;
 }
+type StraightProfile = { axis: Vec; centre: Vec; from: number; to: number; width: number; round: boolean; sampled: boolean };
+const fitting = (e: GeometryElement) => /отвод|тройник|муфт|фитинг|elbow|fitting|tee\b/i.test(e.name);
+/** Recognize a single straight extrusion from its geometry, independently of
+ * world rotation. Curved fittings keep the established local-overlap metric.
+ */
+async function straightProfile(e: GeometryElement, checkpoint: () => Promise<void>): Promise<StraightProfile | undefined> {
+  if (fitting(e)) return;
+  const count = triangleCount(e), step = Math.max(1, Math.ceil(count / 4096)),
+    centre = e.bounds.min.map((v, k) => (v + e.bounds.max[k]) / 2) as Vec,
+    points: Vec[] = [], normals: { n: Vec; area: number }[] = [];
+  for (let i = 0; i < count; i += step) {
+    if (i % (step * 256) === 0) await checkpoint();
+    const t = tri(e, i), n = cross(sub(t[1], t[0]), sub(t[2], t[0])), area = norm(n);
+    if (!area) continue;
+    points.push(...t); normals.push({ n: n.map(v => v / area) as Vec, area });
+  }
+  if (points.length < 12) return;
+  let axis = eigenAxes(points, centre)[0];
+  const sides = normals.filter(({ n }) => Math.abs(dot(n, axis)) < 0.2);
+  if (sides.length < 4) return;
+  const refined = eigenAxes(sides.map(({ n }) => n), [0, 0, 0])[2];
+  if (Math.abs(dot(refined, axis)) < 0.98) return;
+  axis = refined;
+  const k = axis.map(Math.abs).indexOf(Math.max(...axis.map(Math.abs)));
+  if (axis[k] < 0) axis = axis.map(v => -v) as Vec;
+  const seed: Vec = Math.abs(axis[0]) < 0.7 ? [1, 0, 0] : [0, 1, 0],
+    u = unit(cross(axis, seed))!, v = cross(axis, u),
+    lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of points) for (const [j, n] of [axis, u, v].entries()) {
+    const t = dot(sub(p, centre), n); lo[j] = Math.min(lo[j], t); hi[j] = Math.max(hi[j], t);
+  }
+  const length = hi[0] - lo[0], crossWidth = Math.max(hi[1] - lo[1], hi[2] - lo[2]),
+    crossMin = Math.min(hi[1] - lo[1], hi[2] - lo[2]);
+  if (crossMin <= numericalEpsilon(e) * 8 || length + numericalEpsilon(e) < crossWidth * 4 || crossWidth > crossMin * 4) return;
+  let good = 0, total = 0;
+  const lateral = new Set<string>();
+  for (const { n, area } of normals) {
+    const alignment = Math.abs(dot(n, axis));
+    total += area;
+    if (alignment < 0.015 || alignment > 0.999) good += area;
+    if (alignment < 0.015) lateral.add(n.map(v => Math.round(v * 100)).join(","));
+  }
+  if (good < total * 0.995) return;
+  const intervals: [number, number][] = [];
+  for (let i = 0; i < points.length; i += 3) {
+    const t = points.slice(i, i + 3).map(p => dot(sub(p, centre), axis));
+    intervals.push([Math.min(...t), Math.max(...t)]);
+  }
+  intervals.sort((a, b) => a[0] - b[0]);
+  let end = lo[0];
+  for (const [from, to] of intervals) {
+    if (from > end + numericalEpsilon(e) * 4) return;
+    end = Math.max(end, to);
+  }
+  const lineCentre = add(add(centre, u, (lo[1] + hi[1]) / 2), v, (lo[2] + hi[2]) / 2);
+  return { axis, centre: lineCentre, from: lo[0], to: hi[0], width: crossWidth,
+    round: lateral.size >= 6 && crossWidth < crossMin * 1.2, sampled: step > 1 };
+}
+/** Keep disconnected structures apart when measuring their outer envelopes. */
+async function surfaceComponents(e: GeometryElement, checkpoint: () => Promise<void>): Promise<Int32Array> {
+  const count = triangleCount(e), parent = Int32Array.from({ length: count }, (_, i) => i),
+    rank = new Uint8Array(count), vertices = new Map<string, number>(), eps = numericalEpsilon(e);
+  const root = (i: number): number => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  for (let i = 0; i < count; i++) {
+    if (i % 2048 === 0) await checkpoint();
+    for (const p of tri(e, i)) {
+      const key = p.map((v, k) => Math.round((v - e.bounds.min[k]) / eps)).join(","), previous = vertices.get(key);
+      if (previous === undefined) { vertices.set(key, i); continue; }
+      let a = root(i), b = root(previous);
+      if (a === b) continue;
+      if (rank[a] < rank[b]) [a, b] = [b, a];
+      parent[b] = a;
+      if (rank[a] === rank[b]) rank[a]++;
+    }
+  }
+  for (let i = 0; i < count; i++) parent[i] = root(i);
+  return parent;
+}
+async function axialEntry(profile: StraightProfile, other: GeometryElement, tree: Node, checkpoint: () => Promise<void>, components: () => Promise<Int32Array>): Promise<number | undefined> {
+  const { axis, centre } = profile, seed: Vec = Math.abs(axis[0]) < 0.7 ? [1, 0, 0] : [0, 1, 0],
+    u = unit(cross(axis, seed))!, v = cross(axis, u),
+    lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const eps = numericalEpsilon(other);
+  // The target must be a structure around the profile, not its mating fitting
+  // or a comparable pipe. Project its actual vertices rather than its AABB.
+  for (let i = 0; i < triangleCount(other); i++) {
+    if (i % 2048 === 0) await checkpoint();
+    for (const p of tri(other, i)) for (const [j, n] of [axis, u, v].entries()) {
+      const d = dot(sub(p, centre), n); lo[j] = Math.min(lo[j], d); hi[j] = Math.max(hi[j], d);
+    }
+  }
+  if (hi[1] - lo[1] < profile.width * 2.5 || hi[2] - lo[2] < profile.width * 2.5) return;
+  const margin = Math.max(1, hi[0] - lo[0]), a = add(centre, axis, lo[0] - margin), b = add(centre, axis, hi[0] + margin), crossings: { triangle: number; at: number }[] = [];
+  let visited = 0;
+  for (const i of query(tree, bounds([...a, ...b]), eps)) {
+    if (++visited % 256 === 0) await checkpoint();
+    const hit = segmentTriangle(a, b, tri(other, i), eps);
+    if (hit) crossings.push({ triangle: i, at: dot(sub(hit, centre), axis) });
+  }
+  if (crossings.length < 2) return;
+  const parts = await components(), intervals = new Map<number, [number, number]>();
+  for (const hit of crossings) {
+    const id = parts[hit.triangle], interval = intervals.get(id);
+    if (interval) { interval[0] = Math.min(interval[0], hit.at); interval[1] = Math.max(interval[1], hit.at); }
+    else intervals.set(id, [hit.at, hit.at]);
+  }
+  // The outer interval deliberately includes the cavity of a well. Clip to
+  // the real ends of the profile: an entry stops at its tip; a through passage
+  // stops at the far boundary of the structure.
+  let longest = 0;
+  for (const [from, to] of intervals.values()) {
+    if (to - from > eps) longest = Math.max(longest, Math.min(profile.to, to) - Math.max(profile.from, from));
+  }
+  return longest > eps ? longest * 1000 : undefined;
+}
 export async function calculate(
   elements: GeometryElement[],
   check: Check,
@@ -1008,6 +1127,17 @@ export async function calculate(
     return n;
   };
   const solids = new Map<string, SolidAssessment>();
+  const profiles = new Map<string, StraightProfile | undefined>();
+  const components = new Map<string, Int32Array>();
+  const componentIds = async (e: GeometryElement) => {
+    let ids = components.get(e.id);
+    if (!ids) { ids = await surfaceComponents(e, checkpoint); components.set(e.id, ids); }
+    return ids;
+  };
+  const profile = async (e: GeometryElement) => {
+    if (!profiles.has(e.id)) profiles.set(e.id, await straightProfile(e, checkpoint));
+    return profiles.get(e.id);
+  };
   const prepared = async (e: GeometryElement) => {
     if (check.type !== "intersection") return e;
     let solid = solids.get(e.id);
@@ -1069,6 +1199,7 @@ export async function calculate(
         cache.delete(id);
         bytes -= size(e);
         trees.delete(id);
+        components.delete(id);
         signatures.delete(id);
       }
     }
@@ -1126,7 +1257,8 @@ export async function calculate(
       let point: Vec | undefined,
         kind: Clash["kind"] = "surface",
         penetrationMm = 0,
-        depthState: Clash["depth"];
+        depthState: Clash["depth"],
+        overlapThicknessMm: number | undefined, axialPenetrationMm: number | undefined, axialElementId: string | undefined;
       if (check.type === "duplicates") {
         if (
           triangleCount(x) !== triangleCount(y) ||
@@ -1407,14 +1539,26 @@ export async function calculate(
             kind === "touch" || depthState === "unmeasurable" || depthState === "tolerance"
               ? 0
               : thickness;
+          if (kind !== "touch" && !fitting(x) && !fitting(y)) {
+            const xp = await profile(x), yp = await profile(y);
+            for (const [p, element, other, otherProfile, tree] of [[xp, x, y, yp, yt], [yp, y, x, xp, xt]] as const) {
+              if (!p || (otherProfile?.round && /труб|pipe/i.test(other.name))) continue;
+              const entry = await axialEntry(p, other, tree, checkpoint, () => componentIds(other));
+              if (entry === undefined || entry <= (axialPenetrationMm ?? 0)) continue;
+              axialPenetrationMm = entry; axialElementId = element.id;
+            }
+            if (axialPenetrationMm !== undefined) {
+              overlapThicknessMm = depthState === "unmeasurable" || depthState === "tolerance" ? undefined : penetrationMm;
+              penetrationMm = Math.max(penetrationMm, axialPenetrationMm);
+              if (depthState === "unmeasurable" || depthState === "tolerance" || xp?.sampled || yp?.sampled) depthState = "approximate";
+            }
+          }
           await checkpoint();
         }
-        // A conflict whose depth is not a plain measurement must never vanish
-        // behind a depth filter: a person decides on those.
+        // The effective depth is the larger of local overlap and axial entry.
         if (
           point &&
-          !depthState &&
-          penetrationMm + check.precision < check.minPenetration
+          !passesDepth({ kind, depth: depthState, penetrationMm }, check.minPenetration, check.precision)
         )
           continue;
       }
@@ -1431,6 +1575,7 @@ export async function calculate(
           firstSeen: "",
           lastSeen: "",
           penetrationMm,
+          ...(axialPenetrationMm !== undefined ? { axialPenetrationMm, axialElementId, overlapThicknessMm } : {}),
           ...(depthState ? { depth: depthState } : {}),
         });
         if (found.length >= 50000)

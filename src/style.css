@@ -1142,3 +1142,6 @@ footer {
     height: 90px;
   }
 }
+
+.depth-breakdown { display:grid; grid-template-columns:1fr auto; gap:4px 8px; margin-bottom:9px; font:inherit; }
+.depth-breakdown small {grid-column:1/-1; color:#adbdcf; font:inherit;}

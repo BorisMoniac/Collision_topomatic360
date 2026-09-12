@@ -10,6 +10,7 @@ import {
   State,
   configKey,
   matches,
+  passesDepth,
   newCheck,
   readProject,
   reconcile,
@@ -223,11 +224,7 @@ export function mountPanel(
       (r) =>
         (!state || r.state === state) &&
         (c?.type === "duplicates" ||
-          // A depth that is not a plain measurement is left to a person, so no
-          // threshold hides it. Otherwise the same allowance as the calculation
-          // itself, so one number typed in three places selects the same rows.
-          (r.depth !== undefined && r.kind !== "touch") ||
-          (r.penetrationMm ?? 0) + (c?.precision ?? 0) >= minDepth) &&
+          passesDepth(r, minDepth, c?.precision ?? 0)) &&
         (!search ||
           JSON.stringify({ ...r, image: undefined })
             .toLowerCase()
@@ -287,7 +284,7 @@ export function mountPanel(
     }
     if (tab === "select")
       q("content").innerHTML =
-        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Запас при отборе и фильтрации; не обнуляет малые вхождения и не гарантирует погрешность оценки">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшей оценкой глубины не попадут в результат">Минимальная глубина, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Глубина — оценка локальной толщины перекрытия. Пояснения к расчёту и его ограничениям — в справке.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
+        `<div class="choose-layout"><div class="parameters"><h3>Параметры проверки</h3><label>Тип<select id="type"><option value="intersection" ${c.type === "intersection" ? "selected" : ""}>По пересечению</option><option value="duplicates" ${c.type === "duplicates" ? "selected" : ""}>Дублирование</option></select></label><label title="Запас при отборе и фильтрации; не обнуляет малые вхождения и не гарантирует погрешность оценки">Точность расчёта, мм<input id="precision" type="number" value="${c.precision}" min="0.001" max="100" step="0.1"></label><label title="Конфликты с меньшей оценкой глубины не попадут в результат">Минимальная глубина, мм<input id="min-penetration" type="number" value="${c.minPenetration}" min="0" max="100000" step="1" ${c.type === "duplicates" ? "disabled" : ""}></label><label class="check"><input id="touching" type="checkbox" ${c.touching ? "checked" : ""} ${c.type === "duplicates" ? "disabled" : ""}>Учитывать касания</label><small>Для отбора — большее из толщины перекрытия и захода прямого профиля вдоль оси. Подробнее — в справке.</small><p class="legend"><span class="part-a">● Выбор А</span><span class="part-b">● Выбор Б</span></p></div><div class="selection-grid">${renderSelection(c.a, "a")}${renderSelection(c.b, "b")}</div></div><datalist id="property-fields">${options(fields(), "")}</datalist>`;
     if (tab === "rules")
       q("content").innerHTML =
         `<div class="rules"><h3>Исключение пар</h3><p>Элемент сам с собой не проверяется. Пара А/Б учитывается один раз.</p><label class="check"><input id="same-model" type="checkbox" ${c.ignoreSameModel ? "checked" : ""}>Не проверять элементы одной модели</label><label class="check"><input id="same-group" type="checkbox" ${c.ignoreSameGroup ? "checked" : ""}>Не проверять геометрию одного составного объекта</label><label>Не проверять пары с одинаковым значением свойства<input id="equal-property" list="property-fields" value="${e(c.equalProperty)}" placeholder="Без ограничения"></label><label class="check"><input id="hidden" type="checkbox" ${c.includeHidden ? "checked" : ""}>Включать скрытые элементы прочитанных моделей</label><p>Незагруженные подключённые файлы нужно открыть перед расчётом.</p><datalist id="property-fields">${options(fields(), "")}</datalist></div>`;
@@ -311,7 +308,9 @@ export function mountPanel(
     q("content").inert = busy;
   }
   const depthTitle = (r: Clash) =>
-    r.kind === "touch"
+    r.axialPenetrationMm !== undefined
+      ? `Для отбора используется большее значение: толщина ${r.overlapThicknessMm === undefined ? "не определена" : depthNumber(r.overlapThicknessMm) + " мм"}; продольный заход ${depthNumber(r.axialPenetrationMm)} мм`
+      : r.kind === "touch"
       ? "Тела соприкасаются, общего объёма нет"
       : r.depth === "unmeasurable"
         ? "У элемента нет собственного объёма, замер глубины к нему неприменим"
@@ -342,7 +341,7 @@ export function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${e(depthTitle(r))}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.kind === "touch" ? "Касание" : r.depth ? depthWords[r.depth] : `Глубина ${depthNumber(r.penetrationMm)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll"><div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${e(depthTitle(r))}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.kind === "touch" ? "Касание" : r.depth ? depthWords[r.depth] : `Глубина ${depthNumber(r.penetrationMm)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll">${r.axialPenetrationMm !== undefined ? `<div class="depth-breakdown"><span>Толщина перекрытия</span><b>${r.overlapThicknessMm === undefined ? "—" : depthNumber(r.overlapThicknessMm) + " мм"}</b><span>Заход вдоль оси</span><b>${depthNumber(r.axialPenetrationMm)} мм</b><small>Для фильтра — большее из двух значений. Заход учитывает внутреннее пространство конструкции.</small></div>` : ""}<div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
