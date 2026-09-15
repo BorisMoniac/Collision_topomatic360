@@ -372,8 +372,10 @@ export class ModelHost {
           modelId,
           guid,
           properties: props,
-          hidden:
-            hidden || !!layer?.resolveHidden() || !!layer?.resolveDisabled(),
+          // An IFC layer can be disabled for editing while it is still drawn
+          // in the 3D view. Only the visibility flag and a hidden attachment
+          // should exclude it from a normal clash check.
+          hidden: hidden || !!layer?.resolveHidden(),
           triangles: new Float64Array(0),
           triangleCount,
           closed,

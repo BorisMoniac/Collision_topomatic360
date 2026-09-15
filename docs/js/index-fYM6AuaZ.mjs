@@ -31,7 +31,7 @@ function Pe(t) {
     i(), s.removeEventListener("pointerdown", r), s.removeEventListener("pointerup", i), s.removeEventListener("pointercancel", i), s.removeEventListener("lostpointercapture", i), a.removeEventListener("blur", i);
   };
 }
-const qe = "0.9.1", Vt = (t) => typeof t == "string" && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(t), Ct = {
+const qe = "0.9.2", Vt = (t) => typeof t == "string" && /^data:image\/(jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(t), Ct = {
   new: "Новый",
   active: "Активный",
   reviewed: "Проверенный",
@@ -2260,7 +2260,10 @@ class cn {
           modelId: Z,
           guid: Q,
           properties: P,
-          hidden: q || !!ct?.resolveHidden() || !!ct?.resolveDisabled(),
+          // An IFC layer can be disabled for editing while it is still drawn
+          // in the 3D view. Only the visibility flag and a hidden attachment
+          // should exclude it from a normal clash check.
+          hidden: q || !!ct?.resolveHidden(),
           triangles: new Float64Array(0),
           triangleCount: wt,
           closed: st,
