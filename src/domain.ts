@@ -132,7 +132,7 @@ export const newCheck = (): Check => ({
   minPenetration: 0,
   touching: false,
   ignoreSameModel: false,
-  ignoreSameGroup: false,
+  ignoreSameGroup: true,
   equalProperty: "",
   includeHidden: false,
   results: [],

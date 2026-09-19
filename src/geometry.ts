@@ -699,33 +699,6 @@ function overlapThickness(
     approximate,
   };
 }
-/**
- * Whether a mesh encloses anything at all. A sheet, a single face or a folded
- * surface holds less than a skin of tolerance thickness would, and no volume
- * means no depth to measure. Signed volume is taken about the mesh's own
- * centroid, so the answer is the same however the element is turned, which a
- * test on the world-aligned box could never promise.
- */
-function volumeless(e: GeometryElement, eps: number): boolean {
-  const count = triangleCount(e);
-  if (!count) return true;
-  const centre: Vec = [0, 0, 0];
-  for (let i = 0; i < count; i++)
-    for (let j = 0; j < 9; j += 3)
-      for (let k = 0; k < 3; k++) centre[k] += coordinate(e, i, j + k);
-  for (let k = 0; k < 3; k++) centre[k] /= count * 3;
-  let volume = 0,
-    area = 0;
-  for (let i = 0; i < count; i++) {
-    const t = tri(e, i),
-      a = sub(t[0], centre),
-      b = sub(t[1], centre),
-      c = sub(t[2], centre);
-    volume += dot(a, cross(b, c)) / 6;
-    area += norm(cross(sub(t[1], t[0]), sub(t[2], t[0]))) / 2;
-  }
-  return Math.abs(volume) <= eps * area;
-}
 const numericalEpsilon = (e: GeometryElement) =>
   Math.max(1e-10, Math.max(1, ...e.bounds.min.map(Math.abs), ...e.bounds.max.map(Math.abs)) * Number.EPSILON * 64);
 
@@ -739,7 +712,8 @@ type SolidAssessment = { closed: boolean; approximate: boolean; winding?: boolea
 async function assembledSolid(e: GeometryElement, checkpoint: () => Promise<void>, seamTolerance: number): Promise<SolidAssessment> {
   const eps = numericalEpsilon(e), count = triangleCount(e);
   const open = { closed: false, approximate: false };
-  if (e.closed && !volumeless(e, eps)) return { closed: true, approximate: false };
+  // Importers can label a mesh closed even when its actual triangle boundary
+  // has holes. Validate the geometry before allowing parity containment tests.
   const parent = new Uint32Array(count), rank = new Uint8Array(count),
     flip = new Uint8Array(count), active = new Uint8Array(count);
   for (let i = 0; i < count; i++) parent[i] = i;
@@ -1029,6 +1003,91 @@ async function straightProfile(e: GeometryElement, checkpoint: () => Promise<voi
   return { axis, centre: lineCentre, from: lo[0], to: hi[0], width: crossWidth,
     round: lateral.size >= 6 && crossWidth < crossMin * 1.2, sampled: step > 1 };
 }
+/** Recover connected cross-section rings of a round routed cable/pipe. Each
+ * verified chain supplies a piecewise centreline; unrelated parts stay apart.
+ * Short-edge clustering alone is not sufficient: require planar, round rings,
+ * comparable radii and several actual mesh edges joining neighbouring rings.
+ */
+async function routedProfiles(e: GeometryElement, checkpoint: () => Promise<void>): Promise<StraightProfile[][]> {
+  if (fitting(e) || !/кабел|труб|cable|pipe/i.test(e.name)) return [];
+  const eps = numericalEpsilon(e), vertices: Vec[] = [], vertexIds = new Map<string, number>(), edges = new Map<string, [number, number, number]>();
+  const vertex = (p: Vec) => {
+    const key = p.map((v, k) => Math.round((v - e.bounds.min[k]) / eps)).join(",");
+    let id = vertexIds.get(key);
+    if (id === undefined) { id = vertices.length; vertices.push(p); vertexIds.set(key, id); }
+    return id;
+  };
+  for (let i = 0; i < triangleCount(e); i++) {
+    if (i % 1024 === 0) await checkpoint();
+    const ids = tri(e, i).map(vertex);
+    for (let k = 0; k < 3; k++) {
+      const a = Math.min(ids[k], ids[(k + 1) % 3]), b = Math.max(ids[k], ids[(k + 1) % 3]);
+      if (a !== b) edges.set(`${a},${b}`, [a, b, norm(sub(vertices[a], vertices[b]))]);
+    }
+  }
+  const lengths = [...edges.values()].map(e => e[2]).filter(v => v > eps).sort((a, b) => a - b);
+  if (!lengths.length) return [];
+  const threshold = lengths[Math.floor(lengths.length * 0.1)] * 1.25,
+    parent = Int32Array.from({ length: vertices.length }, (_, i) => i);
+  const root = (i: number): number => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  let tick = 0;
+  for (const [a, b, length] of edges.values()) {
+    if (++tick % 4096 === 0) await checkpoint();
+    if (length <= threshold) parent[root(b)] = root(a);
+  }
+  const groups = new Map<number, Vec[]>();
+  for (let i = 0; i < vertices.length; i++) {
+    const id = root(i), points = groups.get(id);
+    if (points) points.push(vertices[i]); else groups.set(id, [vertices[i]]);
+  }
+  const rings = new Map<number, { centre: Vec; radius: number; normal: Vec }>();
+  for (const [id, points] of groups) {
+    await checkpoint();
+    if (points.length < 6 || points.length > 256) continue;
+    const origin = points[0], centre = [0, 1, 2].map(k => origin[k] + points.reduce((s, p) => s + p[k] - origin[k], 0) / points.length) as Vec,
+      radii = points.map(p => norm(sub(p, centre))), radius = Math.max(...radii), normal = eigenAxes(points, centre)[2];
+    if (!normal || radius <= eps || Math.min(...radii) < radius * 0.88) continue;
+    if (points.some(p => Math.abs(dot(sub(p, centre), normal)) > Math.max(eps * 16, radius * 0.002))) continue;
+    rings.set(id, { centre, radius, normal });
+  }
+  const links = new Map<string, { a: number; b: number; count: number }>();
+  for (const [x, y] of edges.values()) {
+    if (++tick % 4096 === 0) await checkpoint();
+    const a = Math.min(root(x), root(y)), b = Math.max(root(x), root(y));
+    if (a === b || !rings.has(a) || !rings.has(b)) continue;
+    const key = `${a},${b}`, link = links.get(key);
+    if (link) link.count++; else links.set(key, { a, b, count: 1 });
+  }
+  const adjacent = new Map<number, number[]>();
+  for (const { a, b, count } of links.values()) {
+    const x = rings.get(a)!, y = rings.get(b)!, axis = unit(sub(y.centre, x.centre));
+    if (count < 6 || !axis || Math.min(x.radius, y.radius) < Math.max(x.radius, y.radius) * 0.8) continue;
+    if (Math.abs(dot(axis, x.normal)) < 0.5 || Math.abs(dot(axis, y.normal)) < 0.5) continue;
+    adjacent.set(a, [...(adjacent.get(a) || []), b]); adjacent.set(b, [...(adjacent.get(b) || []), a]);
+  }
+  const visited = new Set<number>(), paths: StraightProfile[][] = [];
+  for (const [start, neighbours] of adjacent) {
+    if (neighbours.length !== 1 || visited.has(start)) continue;
+    let current = start, previous = -1;
+    const segments: StraightProfile[] = [];
+    while (!visited.has(current)) {
+      visited.add(current);
+      const choices = adjacent.get(current) || [];
+      if (choices.length > 2) break;
+      const next = choices.find(id => id !== previous);
+      if (next === undefined || visited.has(next)) break;
+      const a = rings.get(current)!, b = rings.get(next)!, delta = sub(b.centre, a.centre), length = norm(delta);
+      if (length > eps) segments.push({ axis: delta.map(v => v / length) as Vec, centre: a.centre, from: 0, to: length,
+        width: Math.max(a.radius, b.radius) * 2, round: true, sampled: true });
+      previous = current; current = next;
+    }
+    if (segments.length) paths.push(segments);
+  }
+  return paths;
+}
 /** Keep disconnected structures apart when measuring their outer envelopes. */
 async function surfaceComponents(e: GeometryElement, checkpoint: () => Promise<void>): Promise<Int32Array> {
   const count = triangleCount(e), parent = Int32Array.from({ length: count }, (_, i) => i),
@@ -1052,7 +1111,7 @@ async function surfaceComponents(e: GeometryElement, checkpoint: () => Promise<v
   for (let i = 0; i < count; i++) parent[i] = root(i);
   return parent;
 }
-async function axialEntry(profile: StraightProfile, other: GeometryElement, tree: Node, checkpoint: () => Promise<void>, components: () => Promise<Int32Array>): Promise<number | undefined> {
+async function axialIntervals(profile: StraightProfile, other: GeometryElement, tree: Node, checkpoint: () => Promise<void>, components: () => Promise<Int32Array>): Promise<{ from: number; to: number; part: number }[]> {
   const { axis, centre } = profile, seed: Vec = Math.abs(axis[0]) < 0.7 ? [1, 0, 0] : [0, 1, 0],
     u = unit(cross(axis, seed))!, v = cross(axis, u),
     lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -1065,7 +1124,7 @@ async function axialEntry(profile: StraightProfile, other: GeometryElement, tree
       const d = dot(sub(p, centre), n); lo[j] = Math.min(lo[j], d); hi[j] = Math.max(hi[j], d);
     }
   }
-  if (hi[1] - lo[1] < profile.width * 2.5 || hi[2] - lo[2] < profile.width * 2.5) return;
+  if (hi[1] - lo[1] < profile.width * 2.5 || hi[2] - lo[2] < profile.width * 2.5) return [];
   const margin = Math.max(1, hi[0] - lo[0]), a = add(centre, axis, lo[0] - margin), b = add(centre, axis, hi[0] + margin), crossings: { triangle: number; at: number }[] = [];
   let visited = 0;
   for (const i of query(tree, bounds([...a, ...b]), eps)) {
@@ -1073,7 +1132,7 @@ async function axialEntry(profile: StraightProfile, other: GeometryElement, tree
     const hit = segmentTriangle(a, b, tri(other, i), eps);
     if (hit) crossings.push({ triangle: i, at: dot(sub(hit, centre), axis) });
   }
-  if (crossings.length < 2) return;
+  if (crossings.length < 2) return [];
   const parts = await components(), intervals = new Map<number, [number, number]>();
   for (const hit of crossings) {
     const id = parts[hit.triangle], interval = intervals.get(id);
@@ -1083,9 +1142,32 @@ async function axialEntry(profile: StraightProfile, other: GeometryElement, tree
   // The outer interval deliberately includes the cavity of a well. Clip to
   // the real ends of the profile: an entry stops at its tip; a through passage
   // stops at the far boundary of the structure.
+  return [...intervals].map(([part, [from, to]]) => ({ part, from: Math.max(profile.from, from), to: Math.min(profile.to, to) }))
+    .filter(({ from, to }) => to - from > eps);
+}
+async function pathEntry(paths: StraightProfile[][], other: GeometryElement, tree: Node, checkpoint: () => Promise<void>, components: () => Promise<Int32Array>): Promise<number | undefined> {
   let longest = 0;
-  for (const [from, to] of intervals.values()) {
-    if (to - from > eps) longest = Math.max(longest, Math.min(profile.to, to) - Math.max(profile.from, from));
+  const eps = numericalEpsilon(other);
+  for (const path of paths) {
+    let offset = 0;
+    const intervals = new Map<number, [number, number][]>();
+    for (const segment of path) {
+      await checkpoint();
+      for (const hit of await axialIntervals(segment, other, tree, checkpoint, components)) {
+        const list = intervals.get(hit.part) || [];
+        list.push([offset + hit.from - segment.from, offset + hit.to - segment.from]); intervals.set(hit.part, list);
+      }
+      offset += segment.to - segment.from;
+    }
+    for (const list of intervals.values()) {
+      list.sort((a, b) => a[0] - b[0]);
+      let start = list[0][0], end = list[0][1];
+      for (const [from, to] of list.slice(1)) {
+        if (from <= end + eps * 4) end = Math.max(end, to);
+        else { longest = Math.max(longest, end - start); start = from; end = to; }
+      }
+      longest = Math.max(longest, end - start);
+    }
   }
   return longest > eps ? longest * 1000 : undefined;
 }
@@ -1129,6 +1211,12 @@ export async function calculate(
   };
   const solids = new Map<string, SolidAssessment>();
   const profiles = new Map<string, StraightProfile | undefined>();
+  const routes = new Map<string, StraightProfile[][]>();
+  const route = async (e: GeometryElement) => {
+    let value = routes.get(e.id);
+    if (!value) { value = await routedProfiles(e, checkpoint); routes.set(e.id, value); }
+    return value;
+  };
   const components = new Map<string, Int32Array>();
   const componentIds = async (e: GeometryElement) => {
     let ids = components.get(e.id);
@@ -1201,6 +1289,7 @@ export async function calculate(
         bytes -= size(e);
         trees.delete(id);
         components.delete(id);
+        routes.delete(id);
         signatures.delete(id);
       }
     }
@@ -1543,10 +1632,13 @@ export async function calculate(
           if (kind !== "touch" && !fitting(x) && !fitting(y)) {
             const xp = await profile(x), yp = await profile(y);
             for (const [p, element, other, otherProfile, tree] of [[xp, x, y, yp, yt], [yp, y, x, xp, xt]] as const) {
-              if (!p || (otherProfile?.round && /труб|pipe/i.test(other.name))) continue;
-              const entry = await axialEntry(p, other, tree, checkpoint, () => componentIds(other));
+              if (otherProfile?.round && /труб|pipe/i.test(other.name)) continue;
+              const paths = p ? [[p]] : await route(element);
+              if (!paths.length) continue;
+              const entry = await pathEntry(paths, other, tree, checkpoint, () => componentIds(other));
               if (entry === undefined || entry <= (axialPenetrationMm ?? 0)) continue;
               axialPenetrationMm = entry; axialElementId = element.id;
+              if (!p) depthState = depthState || "approximate";
             }
             if (axialPenetrationMm !== undefined) {
               overlapThicknessMm = depthState === "unmeasurable" || depthState === "tolerance" ? undefined : penetrationMm;
