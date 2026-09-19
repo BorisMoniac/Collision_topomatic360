@@ -1171,6 +1171,66 @@ async function pathEntry(paths: StraightProfile[][], other: GeometryElement, tre
   }
   return longest > eps ? longest * 1000 : undefined;
 }
+/** Actual triangle intersection, including the full polygon of coplanar faces. */
+function contactPolygon(a: Vec[], b: Vec[], eps: number): Vec[] {
+  const normal = unit(cross(sub(b[1], b[0]), sub(b[2], b[0])));
+  if (!normal) return [];
+  if (a.some(p => Math.abs(dot(sub(p, b[0]), normal)) > eps)) {
+    const out: Vec[] = []; crossings(a, b, eps, out); return out;
+  }
+  let polygon = a;
+  for (let i = 0; i < 3 && polygon.length; i++) {
+    const origin = b[i], edge = sub(b[(i + 1) % 3], origin), inward = unit(cross(normal, edge));
+    if (!inward) return [];
+    const out: Vec[] = [];
+    for (let j = 0; j < polygon.length; j++) {
+      const p = polygon[j], q = polygon[(j + 1) % polygon.length],
+        dp = dot(sub(p, origin), inward), dq = dot(sub(q, origin), inward);
+      if (dp >= -eps) out.push(p);
+      if ((dp >= -eps) !== (dq >= -eps)) out.push(add(p, sub(q, p), Math.max(0, Math.min(1, dp / (dp - dq)))));
+    }
+    polygon = out;
+  }
+  return polygon;
+}
+/** Boundary contact is a separate reading, never a replacement for depth.
+ * Project actual triangle intersections onto each verified route segment;
+ * merge only overlapping intervals, so gaps and unrelated routes stay apart.
+ */
+async function surfaceContactLength(paths: StraightProfile[][], element: GeometryElement, other: GeometryElement, tree: Node, otherTree: Node, checkpoint: () => Promise<void>): Promise<number | undefined> {
+  const eps = Math.max(numericalEpsilon(element), numericalEpsilon(other)), intervals = paths.map(() => [] as [number, number][]),
+    segments = paths.map(path => { let offset = 0; return path.map(p => { const s = { p, offset }; offset += p.to - p.from; return s; }); });
+  const insert = (list: [number, number][], from: number, to: number) => {
+    let lo = 0, hi = list.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid][1] < from - eps * 4) lo = mid + 1; else hi = mid; }
+    let end = lo;
+    while (end < list.length && list[end][0] <= to + eps * 4) { from = Math.min(from, list[end][0]); to = Math.max(to, list[end][1]); end++; }
+    list.splice(lo, end - lo, [from, to]);
+  };
+  let visited = 0;
+  for (const [i, j] of queryPairs(tree, otherTree, eps)) {
+    if (++visited % 256 === 0) await checkpoint();
+    const a = tri(element, i), b = tri(other, j);
+    if (!trianglesIntersect(a, b, eps, true)) continue;
+    const points = contactPolygon(a, b, eps);
+    if (points.length < 2) continue;
+    for (let k = 0; k < segments.length; k++) for (const { p, offset } of segments[k]) {
+      const projected = points.map(v => dot(sub(v, p.centre), p.axis)),
+        from = Math.max(p.from, Math.min(...projected)), to = Math.min(p.to, Math.max(...projected));
+      if (to - from <= eps) continue;
+      // A triangle near another part of a folded route must not paint this
+      // segment merely because their one-dimensional projections overlap.
+      if (!points.some((v, n) => {
+        const at = Math.max(p.from, Math.min(p.to, projected[n]));
+        return norm(sub(v, add(p.centre, p.axis, at))) <= p.width * 0.7 + eps;
+      })) continue;
+      insert(intervals[k], offset + from - p.from, offset + to - p.from);
+    }
+  }
+  let longest = 0;
+  for (const list of intervals) for (const [from, to] of list) longest = Math.max(longest, to - from);
+  return longest > eps ? longest * 1000 : undefined;
+}
 export async function calculate(
   elements: GeometryElement[],
   check: Check,
@@ -1348,7 +1408,7 @@ export async function calculate(
         kind: Clash["kind"] = "surface",
         penetrationMm = 0,
         depthState: Clash["depth"],
-        overlapThicknessMm: number | undefined, axialPenetrationMm: number | undefined, axialElementId: string | undefined;
+        overlapThicknessMm: number | undefined, axialPenetrationMm: number | undefined, axialElementId: string | undefined, contactLengthMm: number | undefined;
       if (check.type === "duplicates") {
         if (
           triangleCount(x) !== triangleCount(y) ||
@@ -1629,12 +1689,15 @@ export async function calculate(
             kind === "touch" || depthState === "unmeasurable" || depthState === "tolerance"
               ? 0
               : thickness;
-          if (kind !== "touch" && !fitting(x) && !fitting(y)) {
+          if (!fitting(x) && !fitting(y)) {
             const xp = await profile(x), yp = await profile(y);
             for (const [p, element, other, otherProfile, tree] of [[xp, x, y, yp, yt], [yp, y, x, xp, xt]] as const) {
               if (otherProfile?.round && /труб|pipe/i.test(other.name)) continue;
               const paths = p ? [[p]] : await route(element);
               if (!paths.length) continue;
+              const contact = await surfaceContactLength(paths, element, other, element === x ? xt : yt, tree, checkpoint);
+              if (contact !== undefined) contactLengthMm = Math.max(contactLengthMm ?? 0, contact);
+              if (kind === "touch") continue;
               const entry = await pathEntry(paths, other, tree, checkpoint, () => componentIds(other));
               if (entry === undefined || entry <= (axialPenetrationMm ?? 0)) continue;
               axialPenetrationMm = entry; axialElementId = element.id;
@@ -1669,6 +1732,7 @@ export async function calculate(
           lastSeen: "",
           penetrationMm,
           ...(axialPenetrationMm !== undefined ? { axialPenetrationMm, axialElementId, overlapThicknessMm } : {}),
+          ...(contactLengthMm !== undefined ? { contactLengthMm } : {}),
           ...(depthState ? { depth: depthState } : {}),
         });
         if (found.length >= 50000)

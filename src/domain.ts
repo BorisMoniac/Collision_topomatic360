@@ -70,9 +70,11 @@ export interface Clash {
   penetrationMm?: number;
   /** Original local overlap estimate, retained when axial entry is available. */
   overlapThicknessMm?: number;
-  /** Length of a straight element inside the other element's outer envelope. */
+  /** Length of a profile/route inside the other element's outer envelope. */
   axialPenetrationMm?: number;
   axialElementId?: string;
+  /** Longest continuous boundary contact along a recognized profile/route. */
+  contactLengthMm?: number;
   /**
    * How far the depth can be trusted. Absent means an ordinary measurement.
    * "tolerance": an overlap was found but its width could not be resolved.
@@ -376,7 +378,7 @@ export function readProject(text: string): Project {
       )
         throw Error("Некорректная достоверность глубины результата.");
       if (r?.unmeasured && !r.depth) r.depth = "unmeasurable";
-      for (const value of [r?.overlapThicknessMm, r?.axialPenetrationMm])
+      for (const value of [r?.overlapThicknessMm, r?.axialPenetrationMm, r?.contactLengthMm])
         if (value !== undefined && (!Number.isFinite(value) || value < 0))
           throw Error("Некорректный размер пересечения.");
       if (r?.axialElementId !== undefined &&
