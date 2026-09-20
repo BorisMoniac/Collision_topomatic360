@@ -7,7 +7,7 @@ export default {
   open(ctx: Context) {
     ctx.manager.revealView("nashepo.collisionfinder360/checks_panel");
   },
-  mount(ctx: Context) {
+  async mount(ctx: Context) {
     const el = ctx.el as HTMLElement;
     if (!el) return;
     if (panel && manager === ctx.manager) {
@@ -20,6 +20,6 @@ export default {
     el.replaceChildren(container);
     panel = container;
     manager = ctx.manager;
-    dispose = mountPanel(container, new ModelHost(ctx));
+    dispose = await mountPanel(container, new ModelHost(ctx));
   },
 };

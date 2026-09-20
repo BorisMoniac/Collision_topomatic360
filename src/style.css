@@ -1100,6 +1100,13 @@ footer {
   padding: 2px 8px;
   font-size: 9px;
 }
+#project-storage {
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @container (max-width:1050px) {
   .workspace {
     grid-template-columns: 165px minmax(0, 1fr);

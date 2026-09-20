@@ -83,7 +83,7 @@ export interface NavisReportPackage {
 /** Navisworks-compatible tabular HTML with relative image links, packed with
  * its JPEG/PNG folder because a browser cannot download a directory atomically.
  */
-export function navisReportPackage(check: Check, rows: Clash[]): NavisReportPackage {
+export function navisReportPackage(check: Check, rows: Clash[], projectId?: string): NavisReportPackage {
   const base = fileName(check.name), folder = `${base}_files`, files: { name: string; data: Uint8Array }[] = [],
     images = new Map<string, string>();
   for (let i = 0; i < rows.length; i++) {
@@ -127,6 +127,7 @@ export function navisReportPackage(check: Check, rows: Clash[]): NavisReportPack
       format: "nashepo.clash-package",
       version: 1,
       createdAt: new Date().toISOString(),
+      project: projectId ? { id: projectId } : undefined,
       producer: {
         name: "nashepo.collisionfinder360",
         version: pluginVersion,

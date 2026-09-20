@@ -22,47 +22,33 @@ import { calculate, RunProgress } from "./geometry";
 import EngineWorker from "./engine.worker?worker&inline";
 import { download, escape as e, navisReportPackage, depthCell as depthText, depthWords, depthNumber } from "./export";
 import { brandLogo } from "./brand";
+import { ProjectStore } from "./project-store";
+import { watchSceneOwner } from "./scene-owner";
 import css from "./style.css?inline";
 const projects = new WeakMap<object, Project>();
-const sessionPrefix = "nashepo.collisionfinder360.project.";
+const stores = new WeakMap<object, ProjectStore>();
 const emptyProject = (): Project => ({
   format: "nashepo.checks",
   version: 1,
   checks: [],
   sets: [],
 });
-const restoreSession = (id?: string): Project | undefined => {
-  if (!id || typeof sessionStorage === "undefined") return;
-  try {
-    const value = sessionStorage.getItem(sessionPrefix + id);
-    return value ? readProject(value) : undefined;
-  } catch {
-    return;
-  }
-};
-const storeSession = (id: string | undefined, project: Project) => {
-  if (!id || typeof sessionStorage === "undefined") return;
-  try {
-    // Images are reproducible and can exceed the browser storage quota.
-    sessionStorage.setItem(
-      sessionPrefix + id,
-      JSON.stringify(project, (key, value) => (key === "image" ? undefined : value)),
-    );
-  } catch {
-    // The in-memory copy still preserves the complete project for this page.
-  }
-};
-export function mountPanel(
+export async function mountPanel(
   container: HTMLElement,
   host: ModelHost,
-): () => void {
+): Promise<() => void> {
   const root = container.shadowRoot || container.attachShadow({ mode: "open" });
   const disposeResize = guardPanelResize(container);
-  let projectToken = host.projectToken(),
-    projectId = host.projectId(),
-    saved = projectToken
-      ? projects.get(projectToken) || restoreSession(projectId) || emptyProject()
-      : emptyProject();
+  let projectToken = host.projectToken();
+  let projectStore = projectToken ? stores.get(projectToken) : undefined;
+  let storageError = "";
+  if (!projectStore && host.projectWorkspace?.()) {
+    try { projectStore = await ProjectStore.open(host.projectWorkspace()!); }
+    catch (error) { storageError = String(error); }
+  }
+  if (projectStore && projectToken) stores.set(projectToken, projectStore);
+  const memoryProject = projectToken ? projects.get(projectToken) : undefined;
+  let saved = memoryProject || projectStore?.loaded || emptyProject();
   if (projectToken) projects.set(projectToken, saved);
   let snapshot: Snapshot | undefined,
     current = saved.checks[0]?.id || "",
@@ -74,6 +60,8 @@ export function mountPanel(
     worker: Worker | undefined,
     show = true,
     dirty = false;
+  let persistenceTimer:number|undefined;
+  let sceneActive = false;
   const checked = new Set<string>();
   let cancelWorker: (() => void) | undefined,
     previewTimer: number | undefined,
@@ -95,6 +83,18 @@ export function mountPanel(
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
   q("save").after(clearButton);
+  const folderButton = document.createElement("button");
+  folderButton.id = "project-folder";
+  folderButton.textContent = "Папка проверок…";
+  q("open").before(folderButton);
+  const storageLabel = document.createElement("span");
+  storageLabel.id = "project-storage";
+  root.querySelector("footer")!.prepend(storageLabel);
+  const updateStorageLabel = () => {
+    storageLabel.textContent = projectStore ? `Папка: ${projectStore.label}` : "Папка проверок не выбрана";
+    storageLabel.title = storageError || storageLabel.textContent;
+  };
+  updateStorageLabel();
   root.querySelector(".more-popover")!.addEventListener("click", () =>
     root.querySelector(".more-menu")!.removeAttribute("open"),
   );
@@ -167,25 +167,58 @@ export function mountPanel(
       input.focus();
       input.select();
     });
+  let saveRevision = 0;
+  const saveProject = async (store = projectStore, project = saved, token = projectToken, revision = saveRevision) => {
+    try {
+      if (!store) return false;
+      await store.save(project);
+      if (project === saved && token === projectToken && revision === saveRevision) {
+        dirty = false;
+        q("dirty").textContent = "Сохранено в папке проекта";
+      }
+      return true;
+    } catch (error) {
+      if (token === projectToken) {
+        q("dirty").textContent = "Не удалось сохранить в папку";
+        note(error instanceof Error ? error.message : String(error), true);
+      }
+      return false;
+    }
+  };
+  const persistProject = (delay=750) => {
+    clearTimeout(persistenceTimer);
+    const store=projectStore,project=saved,token=projectToken,revision=saveRevision;
+    persistenceTimer=window.setTimeout(async()=>{
+      await saveProject(store,project,token,revision);
+    },delay);
+  };
   const mark = () => {
     dirty = true;
+    saveRevision++;
     q("dirty").textContent = "Есть несохранённые изменения";
     if (projectToken) projects.set(projectToken, saved);
-    storeSession(projectId, saved);
+    persistProject();
   };
-  const switchProject = () => {
+  const switchProject = async () => {
     const nextToken = host.projectToken();
-    if (!nextToken || nextToken === projectToken) return false;
-    if (!projectToken && (saved.checks.length || saved.sets.length))
+    if (nextToken === projectToken) return false;
+    clearTimeout(persistenceTimer);
+    if (dirty) await saveProject();
+    let nextStore = nextToken ? stores.get(nextToken) : undefined;
+    storageError = "";
+    if (!nextStore && host.projectWorkspace?.()) {
+      try { nextStore = await ProjectStore.open(host.projectWorkspace()!); }
+      catch (error) { storageError = String(error); }
+    }
+    // Do not apply a slow load if the user has already switched again.
+    if (nextToken !== host.projectToken()) return false;
+    saved = (nextToken ? projects.get(nextToken) : undefined) || nextStore?.loaded || emptyProject();
+    projectStore = nextStore;
+    if (nextToken) {
       projects.set(nextToken, saved);
-    else
-      saved =
-        projects.get(nextToken) ||
-        restoreSession(host.projectId()) ||
-        emptyProject();
-    projects.set(nextToken, saved);
+      if (nextStore) stores.set(nextToken, nextStore);
+    }
     projectToken = nextToken;
-    projectId = host.projectId();
     snapshot = undefined;
     current = saved.checks[0]?.id || "";
     selected = "";
@@ -194,8 +227,44 @@ export function mountPanel(
     dirty = false;
     host.clear();
     q("dirty").textContent = "";
+    updateStorageLabel();
     return true;
   };
+  const chooseFolder = async () => {
+    if (dirty && projectStore && !await saveProject()) return false;
+    const token = projectToken;
+    const workspace = await host.chooseProjectFolder();
+    if (!workspace) return false;
+    const store = await ProjectStore.open(workspace);
+    if (token !== host.projectToken()) throw Error("Активный проект изменился. Выберите папку повторно.");
+    if (store.loaded) {
+      if ((saved.checks.length || saved.sets.length) &&
+          !confirm("В папке уже есть проверки. Открыть их вместо текущих? Текущие проверки можно заранее сохранить в JSON.")) return false;
+      saved = store.loaded;
+      current = saved.checks[0]?.id || "";
+      selected = "";
+      checked.clear();
+      snapshot = undefined;
+      host.clear();
+    }
+    clearTimeout(persistenceTimer);
+    projectStore = store;
+    if (token) { stores.set(token,store); projects.set(token,saved); }
+    storageError = "";
+    updateStorageLabel();
+    render();
+    if (store.loaded) {
+      dirty = false;
+      q("dirty").textContent = "Проверки открыты из папки";
+    } else if (!await saveProject()) return false;
+    note("Папка проверок подключена. Правила, результаты, статусы, комментарии и снимки сохраняются в неё автоматически.");
+    return true;
+  };
+  folderButton.onclick = () => action(async () => {
+    if (busy) return;
+    setBusy(true);
+    try { await chooseFolder(); } finally { setBusy(false); }
+  });
   const stale = () => {
     const c = check();
     if (c?.lastRun) c.status = "stale";
@@ -489,6 +558,7 @@ export function mountPanel(
     }
   };
   function markers() {
+    if (!sceneActive) return;
     host.markers(resultRows(), selected, show, (id) =>
       action(() => pick(id, true)),
     );
@@ -514,7 +584,7 @@ export function mountPanel(
       });
     }
     markers();
-    if (focus) {
+    if (focus && sceneActive) {
       const r = check()?.results.find((x) => x.id === id);
       if (r) {
         host.focus(r, Number(q<HTMLInputElement>("distance").value));
@@ -532,7 +602,7 @@ export function mountPanel(
     )
       return;
     previewTimer = window.setTimeout(async () => {
-      if (token !== previewToken || busy || selected !== r.id) return;
+      if (!sceneActive || token !== previewToken || busy || selected !== r.id) return;
       try {
         // Frame from the approach camera, not from wherever the flight to the
         // conflict happens to be after half a second.
@@ -565,7 +635,7 @@ export function mountPanel(
     showProgress("Создание снимка пары");
     try {
       const distance = Number(q<HTMLInputElement>("distance").value);
-      r.image = await host.snapshot(r, distance, () => aborted);
+      r.image = await host.snapshot(r, distance, () => aborted || !sceneActive);
       r.imageScope = "pair-ab";
       r.imageDistance = distance;
       mark();
@@ -582,7 +652,7 @@ export function mountPanel(
     }
   }
   async function scan(targets?: Check[], catalogOnly = false) {
-    switchProject();
+    await switchProject();
     showProgress("Подготовка моделей");
     let scope = catalogOnly ? new Set<string>() : scanScope(targets);
     if (!catalogOnly && scope?.size) {
@@ -632,6 +702,7 @@ export function mountPanel(
       "run",
       "save",
       "clear-project",
+      "project-folder",
     ])
       q<HTMLInputElement>(id).disabled = value;
     q("cancel").hidden = !value;
@@ -716,7 +787,15 @@ export function mountPanel(
   }
   async function run(all = false) {
     if (busy) return;
-    switchProject();
+    setBusy(true);
+    try {
+    await switchProject();
+    if (!projectToken) throw Error("Сначала откройте модели в Топоматик 360.");
+    if (storageError) throw Error("Не удалось открыть хранилище проверок. Выберите исправную папку через «Папка проверок…». " + storageError);
+    if (!projectStore) {
+      if (!await chooseFolder()) return;
+    }
+    if (!await saveProject()) throw Error("Проверка не запущена: сначала восстановите запись в папку проекта.");
     const targets = all
       ? [...saved.checks]
       : ([check()].filter(Boolean) as Check[]);
@@ -793,15 +872,18 @@ export function mountPanel(
       render();
       markers();
       note(
-        `Проверка завершена. ${check()?.results.length || 0} результатов. Сохраните проверки для продолжения работы.`,
+        `Проверка завершена. ${check()?.results.length || 0} результатов.`,
       );
       const first = check()?.results.find((r) => r.id === selected);
-      if (first && !aborted) await previewPair(first);
+      if (first && !aborted && sceneActive) await previewPair(first);
+      clearTimeout(persistenceTimer);
+      await saveProject();
     } finally {
       hideProgress();
       setBusy(false);
       render();
     }
+    } finally { setBusy(false); }
   }
   function editSelection(target: HTMLElement) {
     const side = target.closest<HTMLElement>("[data-side]")?.dataset.side as
@@ -957,8 +1039,7 @@ export function mountPanel(
   };
   q("save").onclick = () => {
     download("НашеПО-проверки.json", JSON.stringify(saved, null, 2));
-    dirty = false;
-    q("dirty").textContent = "Файл проверок сохранён";
+    q("dirty").textContent = "Копия JSON подготовлена";
   };
   q("open").onclick = () => q("file").click();
   q<HTMLInputElement>("file").onchange = () =>
@@ -974,13 +1055,12 @@ export function mountPanel(
       saved = incoming;
       if (snapshot && host.isCurrent()) reconcileModelSelections(snapshot.models);
       if (projectToken) projects.set(projectToken, saved);
-      storeSession(projectId, saved);
+        mark();
       current = saved.checks[0]?.id || "";
       selected = "";
       checked.clear();
       host.clear();
-      dirty = false;
-      q("dirty").textContent = "Проверки открыты";
+      q("dirty").textContent = "Проверки открыты; сохранение в папку…";
       render();
       note("Проверки открыты. Обновите модели перед переходом к элементам.");
       q<HTMLInputElement>("file").value = "";
@@ -1346,7 +1426,7 @@ export function mountPanel(
               r.imageScope === "pair-ab" ? r : { ...r, image: undefined },
             )
           : rows.map((r) => ({ ...r, image: undefined }));
-        const report = navisReportPackage(c, exportRows);
+        const report = navisReportPackage(c, exportRows, projectStore?.projectId);
         download(report.archiveName, report.blob);
         note(
           "Отчёт подготовлен. Результатов: " +
@@ -1370,9 +1450,11 @@ export function mountPanel(
     if (row && !t.closest("input"))
       action(() => pick(row.dataset.result!, true));
   };
-  const contextTimer = setInterval(() => {
-    if (busy) return;
-    if (switchProject()) {
+  let contextSwitching=false;
+  const contextTimer = setInterval(async () => {
+    if (busy||contextSwitching) return;
+    contextSwitching=true;
+    try{if (await switchProject()) {
       q("model-count").textContent = "Модели не прочитаны";
       note(
         saved.checks.length
@@ -1386,12 +1468,25 @@ export function mountPanel(
       q("model-count").textContent = "3D-окно изменилось";
       note("Активное 3D-окно изменилось. Обновите модели.");
       if (!busy) render();
-    }
+    }}finally{contextSwitching=false;}
   }, 1500);
   render();
+  if (storageError) note("Не удалось открыть папку проверок: " + storageError, true);
+  const stopScene = watchSceneOwner(container, () => {
+    sceneActive = true;
+    if (host.isCurrent()) markers();
+  }, () => {
+    sceneActive = false;
+    clearTimeout(previewTimer);
+    previewToken++;
+    host.clear();
+  });
   return () => {
+    stopScene();
     disposeResize();
     clearInterval(contextTimer);
+    clearTimeout(persistenceTimer);
+    if (dirty) void saveProject();
     clearTimeout(previewTimer);
     previewToken++;
     aborted = true;

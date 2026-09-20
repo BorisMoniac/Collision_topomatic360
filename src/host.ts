@@ -119,8 +119,16 @@ export class ModelHost {
   projectToken() {
     return this.app as object | undefined;
   }
-  projectId() {
-    return this.app?.id;
+  projectWorkspace() {
+    const ws = this.app?.workspace;
+    return ws && !ws.inmemory && ws.root.mimeType === "application/vnd.folder" &&
+      /\.wdx$/i.test(ws.root.title) ? ws : undefined;
+  }
+  async chooseProjectFolder() {
+    return this.ctx.openFolderDialog({
+      message: "Выберите папку проекта проверок: новую или с сохранёнными проверками",
+      buttonLabel: "Открыть папку проверок",
+    });
   }
   async captureWorkspace<T>(task: () => Promise<T>): Promise<T> {
     const outer = this.captureDepth++ === 0;
