@@ -20,7 +20,7 @@ import {
 import { ModelHost, Snapshot } from "./host";
 import { calculate, RunProgress } from "./geometry";
 import EngineWorker from "./engine.worker?worker&inline";
-import { download, escape as e, navisReportPackage, viewerSession, depthCell as depthText, depthWords, depthNumber } from "./export";
+import { download, escape as e, navisReportPackage, depthCell as depthText, depthWords, depthNumber } from "./export";
 import { brandLogo } from "./brand";
 import css from "./style.css?inline";
 const projects = new WeakMap<object, Project>();
@@ -305,7 +305,7 @@ export function mountPanel(
     }
     if (tab === "report")
       q("content").innerHTML =
-        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать отчёт для Robur (.zip)</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Архив содержит HTML в формате отчёта Navisworks и отдельную папку снимков. Распакуйте архив и откройте HTML в плагине Robur «НашеПО · Поиск коллизий».</p><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
+        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать пакет отчёта (.zip)</button><p>Один архив открывается напрямую в плагине Топоматик 360 «Коллизии». Для Robur распакуйте архив и откройте HTML: папка снимков уже связана с ним. Внутри также находятся manifest.json и review.json для сохранения идентификаторов и дальнейшего обмена статусами.</p><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
   const depthTitle = (r: Clash) =>
@@ -1275,7 +1275,7 @@ export function mountPanel(
           pick(rows[i].id, true);
         }
       }
-      if (b?.id === "export-html" || b?.id === "export-viewer") {
+      if (b?.id === "export-html") {
         let failedImages = 0;
         const rows = q<HTMLInputElement>("selected-only").checked
           ? c.results.filter((r) => checked.has(r.id))
@@ -1346,12 +1346,8 @@ export function mountPanel(
               r.imageScope === "pair-ab" ? r : { ...r, image: undefined },
             )
           : rows.map((r) => ({ ...r, image: undefined }));
-        if (b.id === "export-html") {
-          const report = navisReportPackage(c, exportRows);
-          download(report.archiveName, report.blob);
-        } else {
-          download(c.name + ".collision360.json", viewerSession(c, exportRows));
-        }
+        const report = navisReportPackage(c, exportRows);
+        download(report.archiveName, report.blob);
         note(
           "Отчёт подготовлен. Результатов: " +
             rows.length +

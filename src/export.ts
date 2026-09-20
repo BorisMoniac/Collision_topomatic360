@@ -1,5 +1,6 @@
 import { Check, Clash, stateNames, isSnapshot } from "./domain";
 import { utf8, zip } from "./archive";
+import { version as pluginVersion } from "../package.json";
 export const escape = (v: unknown) =>
   String(v ?? "").replace(
     /[&<>"']/g,
@@ -109,11 +110,46 @@ export function navisReportPackage(check: Check, rows: Clash[]): NavisReportPack
           row.axialPenetrationMm === undefined ? "" : depthNumber(row.axialPenetrationMm),
           row.contactLengthMm === undefined ? "" : `≈ ${depthNumber(row.contactLengthMm)}`,
         ];
-      return `<tr class="contentRow">${general.map((value, i) => `<td class="contentCell">${i ? escape(value) : value}</td>`).join("")}${itemValues(row.a).map(value => `<td class="item1Content">${escape(value)}</td>`).join("")}${itemValues(row.b).map(value => `<td class="item2Content">${escape(value)}</td>`).join("")}</tr>`;
+      return `<tr class="contentRow" data-check-id="${escape(check.id)}" data-clash-id="${escape(row.id)}">${general.map((value, i) => `<td class="contentCell">${i ? escape(value) : value}</td>`).join("")}${itemValues(row.a).map(value => `<td class="item1Content">${escape(value)}</td>`).join("")}${itemValues(row.b).map(value => `<td class="item2Content">${escape(value)}</td>`).join("")}</tr>`;
     }).join(""),
     html = `<!doctype html><html><head><meta charset="utf-8"><title>Отчет о конфликтах</title><style>body,table{font-family:Calibri,Tahoma,Verdana,Arial,sans-serif}table{border-collapse:collapse}.titleTable{margin-bottom:16px}.headerCell{font-size:18pt;font-weight:bold}.testSummaryTable{border:3px solid #222;background:#eee;margin-bottom:16px}.testName{font-size:16pt;font-weight:bold;padding:12px}.mainTable td{border:1px solid #999;padding:6px;vertical-align:middle;min-width:90px}.headerRow{font-weight:bold}.generalHeader{background:#eee}.item1Header{background:#9cf}.item2Header{background:#fcc}.item1Content{background:#def}.item2Content{background:#fee}.contentRow{height:100px}</style></head><body><table class="titleTable"><tr class="headerRow"><td class="headerCell">Отчет о конфликтах</td></tr></table><table class="testSummaryTable"><tr class="headerRow"><td class="testName">${escape(check.name)}</td></tr></table><table class="mainTable"><tr class="headerRow"><td colspan="${generalHeaders.length}" class="generalHeader"></td><td colspan="${itemHeaders.length}" class="item1Header">Элемент 1</td><td colspan="${itemHeaders.length}" class="item2Header">Элемент 2</td></tr><tr class="headerRow">${header}</tr>${body}</table></body></html>`;
   const htmlName = `${base}.html`;
-  files.unshift({ name: htmlName, data: utf8(html) });
+  const review = viewerReport(
+      check,
+      rows,
+      row => {
+        const image = images.get(row.id);
+        return image ? `${folder}/${image}` : "";
+      },
+      {},
+    ),
+    manifest = {
+      format: "nashepo.clash-package",
+      version: 1,
+      createdAt: new Date().toISOString(),
+      producer: {
+        name: "nashepo.collisionfinder360",
+        version: pluginVersion,
+      },
+      check: {
+        id: check.id,
+        name: check.name,
+        type: check.type,
+        status: check.status,
+        lastRun: check.lastRun || "",
+        models: check.modelsAtRun || [],
+      },
+      files: {
+        report: htmlName,
+        review: "review.json",
+        images: folder,
+      },
+    };
+  files.unshift(
+    { name: htmlName, data: utf8(html) },
+    { name: "review.json", data: utf8(JSON.stringify(review, null, 2)) },
+    { name: "manifest.json", data: utf8(JSON.stringify(manifest, null, 2)) },
+  );
   const bytes = zip(files), buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   return { archiveName: `${base}.zip`, htmlName, imageCount: images.size,
     blob: new Blob([buffer], { type: "application/zip" }) };
@@ -149,16 +185,41 @@ export function reportHtml(check: Check, rows: Clash[]): string {
     )}</select>${check.type === "intersection" ? '<input id="depth" type="number" min="0" step="1" placeholder="Глубина от, мм">' : ""}<span id="count"></span><div class="wrap"><table><thead><tr>${["Снимок", "№", "Состояние", "Глубина для отбора, мм", "Толщина перекрытия, мм", "Заход вдоль оси, мм", "Длина контакта, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "X", "Y", "Z", "Назначение", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.map((r, i) => `<tr data-state="${r.state}" data-depth="${r.penetrationMm ?? 0}"${(r.depth === "unmeasurable" || r.depth === "tolerance") && r.kind !== "touch" ? " data-unmeasured=\"1\"" : ""}><td>${isSnapshot(r.image) ? `<button class="shot" type="button"><img src="${r.image}" alt="Снимок конфликта ${i + 1}" loading="lazy"></button>` : "Снимок отсутствует"}</td>${[i + 1, stateNames[r.state], depthCell(r, check.type), r.overlapThicknessMm === undefined ? "—" : depthNumber(r.overlapThicknessMm), r.axialPenetrationMm === undefined ? "—" : depthNumber(r.axialPenetrationMm), r.contactLengthMm === undefined ? "—" : "≈ " + depthNumber(r.contactLengthMm), r.a.name, r.a.model, r.a.guid, r.b.name, r.b.model, r.b.guid, ...r.point.map((v) => v.toFixed(4)), r.assignee, r.note].map((v) => `<td>${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div><dialog id="picture"><button id="close-picture">Закрыть</button><img id="full-picture" alt="Снимок конфликта"></dialog><script>const modal=document.getElementById("picture");document.getElementById("close-picture").onclick=()=>modal.close();for(const b of document.querySelectorAll(".shot"))b.onclick=()=>{document.getElementById("full-picture").src=b.querySelector("img").src;modal.showModal()};const PREC=${Number(check.precision) || 0},q=document.getElementById('search'),s=document.getElementById('state'),d=document.getElementById('depth'),rows=[...document.querySelectorAll('tbody tr')];function filter(){let n=0;for(const r of rows){r.hidden=!!((s.value&&r.dataset.state!==s.value)||(d&&!r.dataset.unmeasured&&Number(r.dataset.depth)+PREC<Number(d.value||0))||!r.textContent.toLowerCase().includes(q.value.toLowerCase()));if(!r.hidden)n++}document.getElementById('count').textContent='Коллизий: '+n}q.oninput=s.onchange=filter;if(d)d.oninput=filter;filter()</script></html>`;
 }
 export function viewerSession(check: Check, rows: Clash[]): string {
+  const imageNames = new Map(
+    rows
+      .filter((r) => isSnapshot(r.image))
+      .map((r) => [
+        r.id,
+        r.id + (r.image!.startsWith("data:image/png") ? ".png" : ".jpg"),
+      ]),
+  );
   return JSON.stringify(
-    {
+    viewerReport(
+      check,
+      rows,
+      row => imageNames.get(row.id) || "",
+      Object.fromEntries(
+        rows
+          .filter((r) => isSnapshot(r.image))
+          .map((r) => [imageNames.get(r.id)!, r.image!]),
+      ),
+    ),
+    null,
+    2,
+  );
+}
+
+function viewerReport(
+  check: Check,
+  rows: Clash[],
+  imageName: (row: Clash) => string,
+  images: Record<string, string>,
+) {
+  return {
       version: 1,
       id: check.id,
       name: check.name,
-      images: Object.fromEntries(
-        rows
-          .filter((r) => isSnapshot(r.image))
-          .map((r) => [r.id + ".jpg", r.image]),
-      ),
+      images,
       warnings: check.warnings,
       tests: [
         {
@@ -180,7 +241,7 @@ export function viewerSession(check: Check, rows: Clash[]): string {
             group: r.assignee,
             note: r.note,
             point: r.point,
-            image: isSnapshot(r.image) ? r.id + ".jpg" : "",
+            image: imageName(r),
             enabled: r.state !== "resolved",
             reviewed:
               r.state === "resolved" ||
@@ -207,8 +268,5 @@ export function viewerSession(check: Check, rows: Clash[]): string {
           })),
         },
       ],
-    },
-    null,
-    2,
-  );
+    };
 }
