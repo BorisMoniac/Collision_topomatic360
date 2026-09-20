@@ -20,7 +20,7 @@ import {
 import { ModelHost, Snapshot } from "./host";
 import { calculate, RunProgress } from "./geometry";
 import EngineWorker from "./engine.worker?worker&inline";
-import { download, escape as e, reportHtml, viewerSession, depthCell as depthText, depthWords, depthNumber } from "./export";
+import { download, escape as e, navisReportPackage, viewerSession, depthCell as depthText, depthWords, depthNumber } from "./export";
 import { brandLogo } from "./brand";
 import css from "./style.css?inline";
 const projects = new WeakMap<object, Project>();
@@ -305,7 +305,7 @@ export function mountPanel(
     }
     if (tab === "report")
       q("content").innerHTML =
-        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать HTML-отчёт</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
+        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать отчёт для Robur (.zip)</button><button id="export-viewer">Сессия для плагина «Коллизии»</button><p>Архив содержит HTML в формате отчёта Navisworks и отдельную папку снимков. Распакуйте архив и откройте HTML в плагине Robur «НашеПО · Поиск коллизий».</p><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
   const depthTitle = (r: Clash) =>
@@ -1346,12 +1346,12 @@ export function mountPanel(
               r.imageScope === "pair-ab" ? r : { ...r, image: undefined },
             )
           : rows.map((r) => ({ ...r, image: undefined }));
-        download(
-          c.name + (b.id === "export-html" ? ".html" : ".collision360.json"),
-          b.id === "export-html"
-            ? reportHtml(c, exportRows)
-            : viewerSession(c, exportRows),
-        );
+        if (b.id === "export-html") {
+          const report = navisReportPackage(c, exportRows);
+          download(report.archiveName, report.blob);
+        } else {
+          download(c.name + ".collision360.json", viewerSession(c, exportRows));
+        }
         note(
           "Отчёт подготовлен. Результатов: " +
             rows.length +

@@ -1,4 +1,5 @@
 import { Check, Clash, stateNames, isSnapshot } from "./domain";
+import { utf8, zip } from "./archive";
 export const escape = (v: unknown) =>
   String(v ?? "").replace(
     /[&<>"']/g,
@@ -7,9 +8,9 @@ export const escape = (v: unknown) =>
         c
       ]!,
   );
-export function download(name: string, content: string) {
+export function download(name: string, content: string | Blob) {
   const url = URL.createObjectURL(
-    new Blob([content], {
+    content instanceof Blob ? content : new Blob([content], {
       type: name.endsWith(".html")
         ? "text/html;charset=utf-8"
         : "application/json;charset=utf-8",
@@ -20,6 +21,102 @@ export function download(name: string, content: string) {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+const fileName = (value: string) =>
+  (value || "Отчёт о конфликтах")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "")
+    .slice(0, 100) || "Отчёт о конфликтах";
+
+const imageBytes = (value: string) => {
+  const comma = value.indexOf(","), binary = atob(value.slice(comma + 1)),
+    result = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) result[i] = binary.charCodeAt(i);
+  return result;
+};
+
+const navisStatus: Record<Clash["state"], string> = {
+  new: "Новый", active: "Активн.", reviewed: "Проверен",
+  approved: "Утвержден", resolved: "Исправлен", excluded: "Исключен",
+};
+
+const property = (item: Clash["a"], ...names: string[]) => {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const expected = new Set(names.map(normalize));
+  const found = Object.entries(item.properties || {}).find(([key]) => expected.has(normalize(key)));
+  return found?.[1] || "";
+};
+
+const navisDistance = (check: Check, row: Clash) =>
+  check.type === "duplicates" ? "0.000" :
+    row.kind === "touch" ? "0.000" :
+      row.penetrationMm === undefined || row.depth === "unmeasurable" || row.depth === "tolerance" ? "" :
+        (-row.penetrationMm / 1000).toFixed(3);
+
+const navisDescription = (check: Check, row: Clash) =>
+  check.type === "duplicates" ? "Дублирование" :
+    row.kind === "touch" ? "Касание" :
+      row.axialPenetrationMm !== undefined ? "По пересечению · продольный заход" : "По пересечению";
+
+const itemValues = (item: Clash["a"]) => [
+  `ID объекта: ${item.id}`,
+  property(item, "Слой", "Layer"),
+  item.model,
+  property(item, "Объект Id", "Object Id", "Id") || item.id,
+  property(item, "IfcName", "ifc.name") || item.name,
+  item.guid,
+  property(item, "Категория", "Category"),
+  property(item, "Семейство", "Family"),
+  property(item, "Объект Тип", "Тип", "Type"),
+  property(item, "IfcClass", "ifc.class", "Класс IFC"),
+];
+
+export interface NavisReportPackage {
+  archiveName: string;
+  htmlName: string;
+  imageCount: number;
+  blob: Blob;
+}
+
+/** Navisworks-compatible tabular HTML with relative image links, packed with
+ * its JPEG/PNG folder because a browser cannot download a directory atomically.
+ */
+export function navisReportPackage(check: Check, rows: Clash[]): NavisReportPackage {
+  const base = fileName(check.name), folder = `${base}_files`, files: { name: string; data: Uint8Array }[] = [],
+    images = new Map<string, string>();
+  for (let i = 0; i < rows.length; i++) {
+    const image = rows[i].image;
+    if (!isSnapshot(image)) continue;
+    const extension = image.startsWith("data:image/png") ? "png" : "jpg",
+      name = `cd${String(i + 1).padStart(6, "0")}.${extension}`;
+    images.set(rows[i].id, name);
+    files.push({ name: `${folder}/${name}`, data: imageBytes(image) });
+  }
+  const generalHeaders = ["Изображение", "Наименование конфликта", "Статус", "Расстояние", "Расположение сетки", "Описание:", "Дата обнаружения", "Точка конфликта", "Назначение", "Комментарий", "Толщина перекрытия, мм", "Заход вдоль оси, мм", "Длина контакта, мм"],
+    itemHeaders = ["Идентификатор элемента", "Слой", "Элемент Файл источника", "Объект Id", "Объект IfcName", "Объект IfcGUID", "Объект Категория", "Объект Семейство", "Объект Тип", "Объект IfcClass"],
+    header = generalHeaders.map(x => `<td class="generalHeader">${escape(x)}</td>`).join("") +
+      itemHeaders.map(x => `<td class="item1Header">${escape(x)}</td>`).join("") +
+      itemHeaders.map(x => `<td class="item2Header">${escape(x)}</td>`).join(""),
+    body = rows.map((row, index) => {
+      const image = images.get(row.id), path = image ? `${encodeURIComponent(folder)}/${image}` : "",
+        general = [
+          image ? `<a target="_blank" href="${path}"><img border="0" width="160" src="${path}" alt="Снимок конфликта ${index + 1}"></a>` : "Снимок отсутствует",
+          `Конфликт${index + 1}`, navisStatus[row.state], navisDistance(check, row), "", navisDescription(check, row),
+          row.firstSeen || check.lastRun || "", `X:${row.point[0].toFixed(4)}, Y:${row.point[1].toFixed(4)}, Z:${row.point[2].toFixed(4)}`,
+          row.assignee, row.note,
+          row.overlapThicknessMm === undefined ? "" : depthNumber(row.overlapThicknessMm),
+          row.axialPenetrationMm === undefined ? "" : depthNumber(row.axialPenetrationMm),
+          row.contactLengthMm === undefined ? "" : `≈ ${depthNumber(row.contactLengthMm)}`,
+        ];
+      return `<tr class="contentRow">${general.map((value, i) => `<td class="contentCell">${i ? escape(value) : value}</td>`).join("")}${itemValues(row.a).map(value => `<td class="item1Content">${escape(value)}</td>`).join("")}${itemValues(row.b).map(value => `<td class="item2Content">${escape(value)}</td>`).join("")}</tr>`;
+    }).join(""),
+    html = `<!doctype html><html><head><meta charset="utf-8"><title>Отчет о конфликтах</title><style>body,table{font-family:Calibri,Tahoma,Verdana,Arial,sans-serif}table{border-collapse:collapse}.titleTable{margin-bottom:16px}.headerCell{font-size:18pt;font-weight:bold}.testSummaryTable{border:3px solid #222;background:#eee;margin-bottom:16px}.testName{font-size:16pt;font-weight:bold;padding:12px}.mainTable td{border:1px solid #999;padding:6px;vertical-align:middle;min-width:90px}.headerRow{font-weight:bold}.generalHeader{background:#eee}.item1Header{background:#9cf}.item2Header{background:#fcc}.item1Content{background:#def}.item2Content{background:#fee}.contentRow{height:100px}</style></head><body><table class="titleTable"><tr class="headerRow"><td class="headerCell">Отчет о конфликтах</td></tr></table><table class="testSummaryTable"><tr class="headerRow"><td class="testName">${escape(check.name)}</td></tr></table><table class="mainTable"><tr class="headerRow"><td colspan="${generalHeaders.length}" class="generalHeader"></td><td colspan="${itemHeaders.length}" class="item1Header">Элемент 1</td><td colspan="${itemHeaders.length}" class="item2Header">Элемент 2</td></tr><tr class="headerRow">${header}</tr>${body}</table></body></html>`;
+  const htmlName = `${base}.html`;
+  files.unshift({ name: htmlName, data: utf8(html) });
+  const bytes = zip(files), buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return { archiveName: `${base}.zip`, htmlName, imageCount: images.size,
+    blob: new Blob([buffer], { type: "application/zip" }) };
 }
 export const depthWords: Record<NonNullable<Clash["depth"]>, string> = {
   unmeasurable: "не определена",
