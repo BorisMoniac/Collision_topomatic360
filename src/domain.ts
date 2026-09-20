@@ -52,7 +52,16 @@ export interface GeometryElement extends ElementInfo {
   interior?: "winding";
   bounds: { min: Vec; max: Vec };
 }
+export interface WorkReply {
+  changeId: string; responseId: string; author: string;
+  state: "fixed" | "excluded" | "active"; comment: string; modifiedAt: string;
+  importedAt: string; baseRun: string; exportId: string; point: Vec;
+  decision: "pending" | "accepted" | "rejected"; decidedAt?: string;
+  stale: boolean; legacy: boolean;
+}
 export interface Clash {
+  workReplies?: WorkReply[];
+  exclusionPoint?: Vec;
   id: string;
   a: ElementInfo;
   b: ElementInfo;
@@ -223,12 +232,14 @@ export function reconcile(
     old.delete(c.id);
     return {
       ...c,
+      workReplies: p?.workReplies?.map(w => ({ ...w, stale: true })),
+      exclusionPoint: p?.exclusionPoint,
       note: p?.note ?? "",
       assignee: p?.assignee ?? "",
       firstSeen: p?.firstSeen ?? now,
       lastSeen: now,
       state:
-        !p || p.state === "resolved"
+        !p || p.state === "resolved" || (p.state === "excluded" && p.exclusionPoint && Math.hypot(...c.point.map((v,i) => v - p.exclusionPoint![i])) > 0.001)
           ? "new"
           : p.state === "new"
             ? "active"
@@ -238,6 +249,7 @@ export function reconcile(
   for (const p of old.values())
     result.push({
       ...p,
+      workReplies: p.workReplies?.map(w => ({ ...w, stale: true })),
       state: p.state === "excluded" ? "excluded" : "resolved",
     });
   return result;
@@ -357,6 +369,14 @@ export function readProject(text: string): Project {
       s.mode = "all";
     }
     for (const r of c.results) {
+      if (r?.workReplies !== undefined && (!Array.isArray(r.workReplies) || !r.workReplies.every(w =>
+          w && [w.changeId,w.responseId,w.author,w.comment,w.modifiedAt,w.importedAt,w.baseRun,w.exportId].every(v => typeof v === "string") &&
+          ["fixed","excluded","active"].includes(w.state) && ["pending","accepted","rejected"].includes(w.decision) &&
+          Array.isArray(w.point) && w.point.length === 3 && w.point.every(Number.isFinite) &&
+          typeof w.stale === "boolean" && typeof w.legacy === "boolean")))
+        throw Error("Некорректная история ответов исполнителя.");
+      if (r?.exclusionPoint !== undefined && (!Array.isArray(r.exclusionPoint) || r.exclusionPoint.length !== 3 || !r.exclusionPoint.every(Number.isFinite)))
+        throw Error("Некорректная точка исключения.");
       if (r?.image !== undefined && !isSnapshot(r.image))
         throw Error("Некорректный снимок результата.");
       if (

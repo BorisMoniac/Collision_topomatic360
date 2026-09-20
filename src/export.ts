@@ -125,6 +125,7 @@ export function navisReportPackage(check: Check, rows: Clash[], projectId?: stri
     ),
     manifest = {
       format: "nashepo.clash-package",
+      exportId: crypto.randomUUID(),
       version: 1,
       createdAt: new Date().toISOString(),
       project: projectId ? { id: projectId } : undefined,

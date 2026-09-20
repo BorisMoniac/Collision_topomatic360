@@ -1,3 +1,5 @@
+import { readResponse, previewResponse, applyResponse, decideReply, replySummary } from "./responses";
+import { responseDialog, repliesHtml } from "./response-ui";
 import { helpHtml } from "./help";
 import { guardPanelResize } from "./resize";
 import { version as pluginVersion } from "../package.json";
@@ -78,7 +80,7 @@ export async function mountPanel(
     .map(([id, title]) => `<button data-tab="${id}">${title}</button>`)
     .join(
       "",
-    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div id="run-progress" class="run-progress" hidden><span id="run-phase">Подготовка</span><div id="run-bar" class="run-bar" role="progressbar"><i id="run-fill"></i></div><span id="run-value"></span></div><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
+    )}</div><div class="header-actions"><button id="scan" title="Перечитать список и геометрию выбранных моделей">↻ Модели</button><button id="run" class="primary">▶ Запустить</button><button id="cancel" hidden>Остановить</button><details class="more-menu"><summary title="Другие команды">⋮</summary><div class="more-popover"><button id="open">Открыть проверки</button><button id="save">Сохранить проверки</button><button id="import-response">Ответ исполнителя…</button><button id="copy">Копировать проверку</button><button id="delete">Удалить проверку</button><button id="settings">Настройки</button><button id="help">Справка</button></div></details></div><span id="dirty"></span></header><div id="run-progress" class="run-progress" hidden><span id="run-phase">Подготовка</span><div id="run-bar" class="run-bar" role="progressbar"><i id="run-fill"></i></div><span id="run-value"></span></div><div class="notice" id="notice" role="status">Откройте IFC/SMDX в проекте и нажмите «Модели».</div><div class="workspace"><aside><div class="aside-title">Проверки</div><input id="test-search" type="search" placeholder="Поиск проверок"><div id="checks"></div><div class="aside-actions"><button id="all">Запустить все</button><button id="new" class="primary">＋ Новая проверка</button></div></aside><section class="main"><div id="content"></div></section></div><footer><span id="model-count">Модели не прочитаны</span><span>Расчёт выполняется на вашем компьютере</span></footer><input id="file" type="file" accept=".json" hidden><input id="response-file" type="file" accept=".zip,.json" hidden><dialog id="settings-dialog"><h2>Настройки</h2><label>Дистанция камеры, м<input id="distance" type="number" value="15" min="0.5"></label><p class="links"><a href="https://nashepo.ru/" target="_blank" rel="noopener noreferrer">Сайт НашеПО</a><a href="https://t.me/RoburFan" target="_blank" rel="noopener noreferrer">Telegram</a></p><button data-close="settings-dialog">Закрыть</button></dialog><dialog id="help-dialog">${helpHtml}<button data-close="help-dialog">Закрыть</button></dialog><dialog id="set-dialog"><h2>Сохранить набор моделей</h2><label>Название<input id="set-name" maxlength="120"></label><div class="dialog-actions"><button id="set-cancel">Отмена</button><button id="set-confirm" class="primary">Сохранить</button></div></dialog></main>`;
   const clearButton = document.createElement("button");
   clearButton.id = "clear-project";
   clearButton.textContent = "Очистить проект";
@@ -289,10 +291,12 @@ export async function mountPanel(
     const search =
         q<HTMLInputElement>("result-search")?.value.toLowerCase() || "",
       state = q<HTMLSelectElement>("result-state")?.value || "",
+      replies = q<HTMLSelectElement>("result-replies")?.value || "",
       minDepth = Number(q<HTMLInputElement>("result-depth")?.value || 0);
     return (c?.results || []).filter(
       (r) =>
         (!state || r.state === state) &&
+        (!replies || (r.workReplies || []).some(w => replies === "all" || w.decision === "pending")) &&
         (c?.type === "duplicates" ||
           passesDepth(r, minDepth, c?.precision ?? 0)) &&
         (!search ||
@@ -302,6 +306,8 @@ export async function mountPanel(
     );
   }
   function renderChecks() {
+    const currentCheck = check();
+    if (currentCheck) q("check-summary").textContent = `${{new:"Не выполнена",done:"Выполнена",stale:"Устарела"}[currentCheck.status]} · ${currentCheck.results.filter(r => !["resolved","excluded"].includes(r.state)).length} в работе / ${currentCheck.results.length}`;
     const query = q<HTMLInputElement>("test-search").value.toLowerCase();
     q("checks").innerHTML = saved.checks
       .filter((c) => c.name.toLowerCase().includes(query))
@@ -364,7 +370,7 @@ export async function mountPanel(
           stateNames,
         )
           .map(([k, v]) => `<option value="${k}">${v}</option>`)
-          .join("")}</select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Глубина от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки" : "○ Знаки"}</button><span id="result-count"></span></div><div class="bulk-tools"><select id="bulk-state" title="Состояние для выбранных строк">${Object.entries(
+          .join("")}</select><select id="result-replies" aria-label="Ответы исполнителей"><option value="">Все результаты</option><option value="pending">Ожидают решения</option><option value="all">С ответами исполнителя</option></select>${c.type === "intersection" ? '<input id="result-depth" type="number" min="0" step="1" placeholder="Глубина от, мм">' : ""}<button id="show-markers" role="switch" aria-checked="${show}">${show ? "● Знаки" : "○ Знаки"}</button><span id="result-count"></span></div><div class="bulk-tools"><select id="bulk-state" title="Состояние для выбранных строк">${Object.entries(
             stateNames,
           )
             .map(([k, v]) => `<option value="${k}">${v}</option>`)
@@ -374,7 +380,7 @@ export async function mountPanel(
     }
     if (tab === "report")
       q("content").innerHTML =
-        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать пакет отчёта (.zip)</button><p>Один архив открывается напрямую в плагине Топоматик 360 «Коллизии». Для Robur распакуйте архив и откройте HTML: папка снимков уже связана с ним. Внутри также находятся manifest.json и review.json для сохранения идентификаторов и дальнейшего обмена статусами.</p><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
+        `<div class="report"><h3>${e(c.name)}</h3><p>Результатов: ${c.results.length}. Выбрано: ${checked.size}. ${c.status === "stale" ? "Результаты устарели — рекомендуется повторный запуск." : ""}</p><label class="check"><input id="selected-only" type="checkbox" ${checked.size ? "checked" : ""}>Только выбранные строки</label><label class="check"><input id="report-images" type="checkbox" checked>Добавить снимки (недостающие будут созданы автоматически)</label><button id="export-html" class="primary">Сформировать пакет отчёта (.zip)</button><p>Один архив открывается напрямую в плагине Топоматик 360 «Коллизии». РОБУР 0.12.0 и новее открывает этот ZIP напрямую: коллизии и снимки загрузятся вместе. Ответ исполнителя загружайте здесь через меню ⋮ → «Ответ исполнителя…». Внутри также находятся manifest.json и review.json для сохранения идентификаторов и дальнейшего обмена статусами.</p><p>Правила и все результаты сохраняются кнопкой «Сохранить проверки» в верхней панели.</p></div>`;
     q("content").inert = busy;
   }
   const depthTitle = (r: Clash) =>
@@ -396,7 +402,7 @@ export async function mountPanel(
     page = Math.max(0, Math.min(page, pages - 1));
     const visible = rows.slice(page * 50, page * 50 + 50);
     q("table").innerHTML = rows.length
-      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Глубина, мм", "Длина контакта, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], depthText(r, c.type), r.contactLengthMm === undefined ? "—" : "≈ " + depthNumber(r.contactLengthMm), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+      ? `<table><thead><tr><th><input id="check-page" type="checkbox" aria-label="Выбрать страницу" ${visible.every((r) => checked.has(r.id)) ? "checked" : ""}></th>${["№", "Состояние", "Ответ исполнителя", "Глубина, мм", "Длина контакта, мм", "Элемент А", "Модель А", "GUID А", "Элемент Б", "Модель Б", "GUID Б", "Комментарий"].map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${visible.map((r, i) => `<tr data-result="${e(r.id)}" class="${r.id === selected ? "active" : ""}"><td><input type="checkbox" class="row-check" aria-label="Выбрать конфликт" ${checked.has(r.id) ? "checked" : ""}></td>${[page * 50 + i + 1, stateNames[r.state], replySummary(r), depthText(r, c.type), r.contactLengthMm === undefined ? "—" : "≈ " + depthNumber(r.contactLengthMm), r.a.name, r.a.model, r.a.guid || "—", r.b.name, r.b.model, r.b.guid || "—", r.note].map((v) => `<td title="${e(v)}">${e(v)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
       : '<div class="empty">Нет результатов. Запустите проверку или измените фильтры.</div>';
     q("page").textContent =
       `${page + 1} / ${pages}`;
@@ -411,7 +417,7 @@ export async function mountPanel(
       position = rows.findIndex((x) => x.id === selected),
       r = c?.results.find((x) => x.id === selected);
     q("detail").innerHTML = r
-      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${e(depthTitle(r))}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.kind === "touch" ? "Касание" : r.depth ? depthWords[r.depth] : `Глубина ${depthNumber(r.penetrationMm)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll">${r.axialPenetrationMm !== undefined ? `<div class="depth-breakdown"><span>Толщина перекрытия</span><b>${r.overlapThicknessMm === undefined ? "—" : depthNumber(r.overlapThicknessMm) + " мм"}</b><span>Заход вдоль оси</span><b>${depthNumber(r.axialPenetrationMm)} мм</b><small>Для фильтра — большее из двух значений. Заход учитывает внутреннее пространство конструкции.</small></div>` : ""}${r.contactLengthMm !== undefined ? `<div class="depth-breakdown"><span>Длина контакта вдоль элемента</span><b>≈ ${depthNumber(r.contactLengthMm)} мм</b><small>Непрерывный участок соприкосновения поверхностей. Это длина контакта, а не глубина; порог глубины её не учитывает.</small></div>` : ""}<div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
+      ? `<div class="detail-head"><div><small>КОЛЛИЗИЯ</small><h3>#${position + 1} ${e(r.a.name)} × ${e(r.b.name)}</h3></div><div class="detail-nav"><button id="previous" title="Предыдущая коллизия" ${position <= 0 ? "disabled" : ""}>‹</button><button id="next" title="Следующая коллизия" ${position < 0 || position >= rows.length - 1 ? "disabled" : ""}>›</button></div></div><div class="clash-summary"><span>${c?.type === "duplicates" ? "Дублирование" : "Пересечение"}</span><span title="${e(depthTitle(r))}">${c?.type === "duplicates" ? "Совпадение геометрии" : r.kind === "touch" ? "Касание" : r.depth ? depthWords[r.depth] : `Глубина ${depthNumber(r.penetrationMm)} мм`}</span><span>${e(stateNames[r.state])}</span></div><p class="legend"><span class="part-a">● Элемент А</span><span class="part-b">● Элемент Б</span></p><div class="preview-slot">${r.image ? `<button id="open-image" class="preview"><img src="${e(r.image)}" alt="Снимок коллизии"><span>Открыть крупнее</span></button>` : '<div class="preview-empty"><span>◫</span><small>Снимок создастся после перехода в 3D</small></div>'}</div><div class="detail-actions"><button id="focus" class="primary">Перейти в 3D</button><button id="capture-image">▣ Снимок пары</button></div><div class="detail-scroll">${repliesHtml(r)}${r.axialPenetrationMm !== undefined ? `<div class="depth-breakdown"><span>Толщина перекрытия</span><b>${r.overlapThicknessMm === undefined ? "—" : depthNumber(r.overlapThicknessMm) + " мм"}</b><span>Заход вдоль оси</span><b>${depthNumber(r.axialPenetrationMm)} мм</b><small>Для фильтра — большее из двух значений. Заход учитывает внутреннее пространство конструкции.</small></div>` : ""}${r.contactLengthMm !== undefined ? `<div class="depth-breakdown"><span>Длина контакта вдоль элемента</span><b>≈ ${depthNumber(r.contactLengthMm)} мм</b><small>Непрерывный участок соприкосновения поверхностей. Это длина контакта, а не глубина; порог глубины её не учитывает.</small></div>` : ""}<div class="coordinates">${r.point.map((v, i) => `<span>${["X", "Y", "Z"][i]} ${v.toFixed(3)}</span>`).join("")}</div><label>Состояние<select id="edit-state">${Object.entries(
           stateNames,
         )
           .map(
@@ -703,6 +709,7 @@ export async function mountPanel(
       "save",
       "clear-project",
       "project-folder",
+      "import-response",
     ])
       q<HTMLInputElement>(id).disabled = value;
     q("cancel").hidden = !value;
@@ -1041,6 +1048,28 @@ export async function mountPanel(
     download("НашеПО-проверки.json", JSON.stringify(saved, null, 2));
     q("dirty").textContent = "Копия JSON подготовлена";
   };
+  q("import-response").onclick = () => { if (!busy) q("response-file").click(); };
+  q<HTMLInputElement>("response-file").onchange = () => action(async () => {
+    const input = q<HTMLInputElement>("response-file"), file = input.files?.[0]; input.value = "";
+    if (!file || busy) return;
+    const originalProject = saved, originalStore = projectStore;
+    const response = await readResponse(file);
+    if (originalProject !== saved || originalStore !== projectStore) throw Error("Проект изменился во время чтения ответа. Откройте файл ещё раз.");
+    const matches = previewResponse(saved, projectStore?.projectId, response);
+    if (!await responseDialog(root, response, matches)) return;
+    if (originalProject !== saved || originalStore !== projectStore || busy) throw Error("Проект изменился. Повторите загрузку ответа.");
+    const count = applyResponse(saved, projectStore?.projectId, response);
+    if (count) {
+      const first = matches.find(m => m.clash && !m.reason && !m.duplicate);
+      current = first!.check!.id; selected = first!.clash!.id; tab = "results"; page = Math.floor(first!.check!.results.indexOf(first!.clash!) / 50);
+      mark(); render();
+      if (projectStore && !await saveProject()) {
+        note("Ответ загружен в открытое окно, но не сохранён в папку. Сохраните проверки в JSON или восстановите запись в папку проекта.", true);
+        return;
+      }
+    }
+    note(`Загружено отметок: ${count}. Они ожидают решения в карточках результатов.${projectStore ? "" : " Сохраните проверки или подключите папку проекта, чтобы сохранить историю."}`);
+  });
   q("open").onclick = () => q("file").click();
   q<HTMLInputElement>("file").onchange = () =>
     action(async () => {
@@ -1118,7 +1147,7 @@ export async function mountPanel(
         render();
         return;
       }
-      if (t.id === "result-state") {
+      if (t.id === "result-state" || t.id === "result-replies") {
         page = 0;
         renderTable();
         return;
@@ -1186,6 +1215,17 @@ export async function mountPanel(
         b = t.closest<HTMLButtonElement>("button"),
         c = check();
       if (!c) return;
+      if (b?.dataset.reply) {
+        const r = c.results.find(r => r.id === selected), w = r?.workReplies?.find(w => w.changeId === b.dataset.reply);
+        if (!r || !w) return;
+        const decision = b.dataset.decision as "accepted" | "rejected";
+        if (decision === "accepted" && !window.confirm(w.state === "fixed"
+            ? "Вы проверили исправление по актуальным моделям? Статус коллизии станет «Исправленный»."
+            : w.state === "excluded" ? "Принять исключение этой коллизии? Оно относится к этой паре и текущей точке, а не ко всем пересечениям элементов."
+            : "Вернуть коллизию в работу по ответу исполнителя?")) return;
+        decideReply(r, w, decision); mark(); renderTable(); renderDetail(); renderChecks(); markers();
+        return;
+      }
       if (b?.dataset.selection) {
         const side = b.closest<HTMLElement>("[data-side]")!.dataset.side as
             "a" | "b",

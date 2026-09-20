@@ -1152,3 +1152,11 @@ footer {
 
 .depth-breakdown { display:grid; grid-template-columns:1fr auto; gap:4px 8px; margin-bottom:9px; font:inherit; }
 .depth-breakdown small {grid-column:1/-1; color:#adbdcf; font:inherit;}
+
+.response-dialog { width:min(1000px,90vw); max-height:85vh; }
+.response-list { overflow:auto; max-height:48vh; }
+.response-list td { white-space:pre-wrap; max-width:320px; overflow-wrap:anywhere; }
+.response-warning { color:#f8cb67; }
+.work-replies article { padding:8px 0; border-bottom:1px solid #41526a; }
+.work-replies article small { display:block; margin:5px 0; }
+.work-replies article p { white-space:pre-wrap; overflow-wrap:anywhere; }
