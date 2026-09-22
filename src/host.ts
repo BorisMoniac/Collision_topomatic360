@@ -174,6 +174,13 @@ export class ModelHost {
       throw Error(
         "Откройте проект Топоматик 360 с IFC или SMDX и сделайте его 3D-окно активным.",
       );
+    // Release the preceding index before building another one. Geometry stays
+    // owned by the host; retaining two full property indexes doubles our peak.
+    this.clear();
+    this.metadata.clear();
+    this.refs.clear();
+    this.scannedApp = undefined;
+    this.scannedView = undefined;
     const models: Snapshot["models"] = [],
       modelIds = new Set<string>(),
       warnings: string[] = [],
@@ -181,7 +188,27 @@ export class ModelHost {
       elements: GeometryElement[] = [],
       refs = new Map<string, DwgModel3d[]>();
     const visited = new Set<Drawing>();
+    const emptyTriangles = new Float64Array(0);
     let hash = 2166136261;
+    const numberBytes = new DataView(new ArrayBuffer(8));
+    const hashNumber = (value: number) => {
+      numberBytes.setFloat64(0, value, true);
+      hash = Math.imul(hash ^ numberBytes.getUint32(0, true), 16777619);
+      hash = Math.imul(hash ^ numberBytes.getUint32(4, true), 16777619);
+    };
+    // Small per-scan LRU: shared ancestors are read once, but leaf properties
+    // are not retained for a second time for every element of a large IFC.
+    const propertyCache = new Map<DwgLayer, Record<string, string>>();
+    const layerProperties = (layer: DwgLayer) => {
+      let own = propertyCache.get(layer);
+      if (own) { propertyCache.delete(layer); propertyCache.set(layer, own); return own; }
+      own = {};
+      flatten(layer.typedProperties(), "", own);
+      if (layer.typed?.name) own["Тип"] = layer.typed.name;
+      propertyCache.set(layer, own);
+      if (propertyCache.size > 256) propertyCache.delete(propertyCache.keys().next().value!);
+      return own;
+    };
     const yieldWork = checkpoint(
       () => aborted() || app !== this.app || view !== this.view,
     );
@@ -220,7 +247,9 @@ export class ModelHost {
         string,
         { key: string; objects: DwgModel3d[]; modelId: string; modelName: string }
       >();
+      let catalogued = 0;
       for (const obj of entities) {
+        if (catalogued++ % 512 === 0) await yieldWork();
         let layer = obj.layer,
           containedName = "";
         while (layer) {
@@ -249,9 +278,18 @@ export class ModelHost {
           modelName: objectModelName,
         });
       }
-      let skippedGeometry = 0;
-      for (const group of groups.values()) {
+      entities.length = 0;
+      const totalObjects = groups.size;
+      let processedObjects = 0, skippedGeometry = 0;
+      for (const [groupId, group] of groups) {
+        groups.delete(groupId);
         const { key, objects, modelId, modelName } = group;
+        processedObjects++;
+        if (performance.now() - lastStatus > 200) {
+          lastStatus = performance.now();
+          status(`Индексирование: ${modelName} · ${processedObjects} / ${totalObjects} объектов`);
+        }
+        await yieldWork();
         if (aborted()) throw Error("Чтение моделей отменено.");
         if (app !== this.app || view !== this.view)
           throw Error(
@@ -267,13 +305,11 @@ export class ModelHost {
               chain.unshift(parent);
               parent = parent.layer;
             }
-            for (const l of chain) {
-              flatten(l.typedProperties(), "", props);
-              if (l.typed?.name) props["Тип"] = l.typed.name;
-            }
+            for (const l of chain) Object.assign(props, layerProperties(l));
           }
         } catch {
-          warnings.push(`${modelName} / ${key}: часть свойств недоступна.`);
+          if (!warnings.includes(`${modelName}: часть свойств недоступна.`))
+            warnings.push(`${modelName}: часть свойств недоступна.`);
         }
         const guid =
           props["ifc.id"] ||
@@ -293,26 +329,26 @@ export class ModelHost {
           min: [Infinity, Infinity, Infinity] as Vec,
           max: [-Infinity, -Infinity, -Infinity] as Vec,
         };
-        let closed = true,
-          invalid = false,
+        // The calculation worker validates the assembled solid itself. Reading
+        // SDK isClosed here may build and retain topology for the entire scene.
+        const closed = false;
+        let invalid = false,
           triangleCount = 0;
         for (const object of objects) {
-          closed &&= object.isClosed;
+          const matrix = object.matrix;
+          const p: Vec = [0, 0, 0];
           for (const mesh of Object.values(object.meshes)) {
             const g = mesh.geometry;
-            if (!g || g.indices.length % 3) {
+            if (!g) { invalid = true; continue; }
+            const vertices = g.vertices, indices = g.indices;
+            if (indices.length % 3) {
               invalid = true;
               continue;
             }
-            closed &&= mesh.isClosed;
-            for (let k = 0; k < g.vertices.length; k += 3) {
-              const p: Vec = [
-                g.vertices[k],
-                g.vertices[k + 1],
-                g.vertices[k + 2],
-              ];
-              Math3d.mat4.mulv3(p, object.matrix, p);
-              if (!p.every(Number.isFinite)) {
+            for (let k = 0; k < vertices.length; k += 3) {
+              p[0] = vertices[k]; p[1] = vertices[k + 1]; p[2] = vertices[k + 2];
+              Math3d.mat4.mulv3(p, matrix, p);
+              if (!Number.isFinite(p[0]) || !Number.isFinite(p[1]) || !Number.isFinite(p[2])) {
                 invalid = true;
                 continue;
               }
@@ -320,31 +356,29 @@ export class ModelHost {
                 box.min[a] = Math.min(box.min[a], p[a]);
                 box.max[a] = Math.max(box.max[a], p[a]);
               }
-              hashText(p.join(","));
+              hashNumber(p[0]); hashNumber(p[1]); hashNumber(p[2]);
               if (k % 60000 === 0) {
                 if (performance.now() - lastStatus > 200) {
                   lastStatus = performance.now();
                   status(
                     "Индексирование: " +
                       modelName +
-                      " · " +
-                      elements.length +
-                      " элементов",
+                      " · " + processedObjects + " / " + totalObjects + " объектов",
                   );
                 }
                 await yieldWork();
                 if (aborted()) throw Error("Чтение моделей отменено.");
               }
             }
-            const vertexCount = g.vertices.length / 3;
+            const vertexCount = vertices.length / 3;
             const finiteVertex = (index: number) =>
-              Number.isFinite(g.vertices[index * 3]) &&
-              Number.isFinite(g.vertices[index * 3 + 1]) &&
-              Number.isFinite(g.vertices[index * 3 + 2]);
-            for (let k = 0; k < g.indices.length; k += 3) {
-              const a = g.indices[k],
-                b = g.indices[k + 1],
-                c = g.indices[k + 2];
+              Number.isFinite(vertices[index * 3]) &&
+              Number.isFinite(vertices[index * 3 + 1]) &&
+              Number.isFinite(vertices[index * 3 + 2]);
+            for (let k = 0; k < indices.length; k += 3) {
+              const a = indices[k],
+                b = indices[k + 1],
+                c = indices[k + 2];
               hash = Math.imul(hash ^ a, 16777619);
               hash = Math.imul(hash ^ b, 16777619);
               hash = Math.imul(hash ^ c, 16777619);
@@ -371,7 +405,6 @@ export class ModelHost {
         if (invalid || !triangleCount) {
           if (!triangleCount) skippedGeometry++;
           if (!triangleCount) continue;
-          closed = false;
         }
         const e: GeometryElement = {
           id,
@@ -384,7 +417,7 @@ export class ModelHost {
           // in the 3D view. Only the visibility flag and a hidden attachment
           // should exclude it from a normal clash check.
           hidden: hidden || !!layer?.resolveHidden(),
-          triangles: new Float64Array(0),
+          triangles: emptyTriangles,
           triangleCount,
           closed,
           bounds: box,
@@ -434,12 +467,12 @@ export class ModelHost {
     }
     this.clear();
     this.refs = refs;
-    this.metadata = new Map(elements.map((e) => [e.id, e]));
+    for (const element of elements) this.metadata.set(element.id, element);
     this.scannedApp = app;
     this.scannedView = view;
     return {
       elements,
-      fingerprint: `${elements.length}:${hash >>> 0}`,
+      fingerprint: `index2:${elements.length}:${hash >>> 0}`,
       warnings: [...new Set(warnings)],
       blockers: [...new Set(blockers)],
       models,

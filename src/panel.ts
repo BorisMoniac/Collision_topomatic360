@@ -273,12 +273,25 @@ export async function mountPanel(
     mark();
     renderChecks();
   };
-  const fields = () =>
-    [
-      ...new Set(
-        (snapshot?.elements || []).flatMap((x) => Object.keys(x.properties)),
-      ),
-    ].sort();
+  const fieldCache = new WeakMap<Snapshot, string[]>();
+  const fields = () => {
+    if (!snapshot) return [];
+    let names = fieldCache.get(snapshot);
+    if (!names) {
+      const unique = new Set<string>();
+      for (const item of snapshot.elements)
+        for (const name of Object.keys(item.properties)) unique.add(name);
+      names = [...unique].sort();
+      fieldCache.set(snapshot, names);
+    }
+    return names;
+  };
+  const selectionCount = (s: Selection, includeHidden: boolean) => {
+    let count = 0;
+    for (const item of snapshot?.elements || [])
+      if ((includeHidden || !item.hidden) && matches(item, s)) count++;
+    return count;
+  };
   const options = (values: string[], value: string) =>
     values
       .map(
@@ -318,10 +331,7 @@ export async function mountPanel(
       .join("");
   }
   function renderSelection(s: Selection, side: "a" | "b") {
-    const count =
-      snapshot?.elements.filter(
-        (x) => (check()!.includeHidden || !x.hidden) && matches(x, s),
-      ).length || 0;
+    const count = selectionCount(s, check()!.includeHidden);
     const requiredModels = s.manualOnly
         ? selectionModelIds(s)
         : s.modelsMode === "selected"
@@ -542,10 +552,7 @@ export async function mountPanel(
     if (!c) return;
     for (const article of root.querySelectorAll<HTMLElement>("[data-side]")) {
       const side = article.dataset.side as "a" | "b";
-      const count =
-        snapshot?.elements.filter(
-          (item) => (c.includeHidden || !item.hidden) && matches(item, c[side]),
-        ).length || 0;
+      const count = selectionCount(c[side], c.includeHidden);
       const requiredModels = c[side].manualOnly
           ? selectionModelIds(c[side])
           : c[side].modelsMode === "selected"
@@ -670,6 +677,8 @@ export async function mountPanel(
       snapshot = catalog;
       if (reconcileModelSelections(catalog.models)) scope = scanScope(targets);
     }
+    // Do not retain the previous metadata index while the new one is built.
+    snapshot = undefined;
     snapshot = await host.scan(
       (message) => {
         note(message);
